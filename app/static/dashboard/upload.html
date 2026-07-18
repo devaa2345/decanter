@@ -1,0 +1,227 @@
+<title>Upload catalog — Sovereign Scents dashboard</title>
+<link rel="stylesheet" href="/dashboard/css/dashboard.css" />
+
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand">Sovereign Scents<small>Owner dashboard</small></div>
+    <a class="nav-link" href="/dashboard/index.html">Overview</a>
+    <a class="nav-link" href="/dashboard/gaps.html">Catalog gaps</a>
+    <a class="nav-link active" href="/dashboard/upload.html">Upload catalog</a>
+    <a class="nav-link" href="/dashboard/versions.html">Versions</a>
+    <div class="nav-spacer"></div>
+    <div class="nav-foot">
+      <button class="theme-toggle" id="theme-toggle-btn">Toggle theme</button>
+      <button class="theme-toggle" id="logout-btn">Log out</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="page-header">
+      <div>
+        <h1>Upload catalog</h1>
+        <p>Upload an updated sheet to regenerate prices, keywords, and matching data. Nothing goes live until you publish.</p>
+      </div>
+    </div>
+
+    <div class="card" id="upload-card">
+      <p class="card-title">1. Choose a file</p>
+      <p class="card-subtitle">
+        .xlsx or .csv export of the sheet (Google Sheets → File → Download). Expected columns:
+        Brand, Fragrance Name, Clone Of, size columns like "3ml"/"10ml", and a full-bottle column
+        (e.g. "BNIB") with values like "100ml - 2800". PDF exports can't be parsed reliably.
+      </p>
+      <div class="dropzone" id="dropzone">
+        <div id="dropzone-label"><strong>Click to choose a file</strong> or drag one here</div>
+        <input type="file" id="file-input" accept=".xlsx,.xlsm,.csv" style="display:none" />
+      </div>
+      <p class="form-error" id="upload-error"></p>
+    </div>
+
+    <div id="review-section" style="display:none">
+      <div class="card">
+        <p class="card-title">2. Review the changes</p>
+        <p class="card-subtitle" id="review-subtitle"></p>
+
+        <div class="diff-summary">
+          <div class="item added"><span class="n" id="added-count">0</span>added</div>
+          <div class="item updated"><span class="n" id="updated-count">0</span>price changes</div>
+          <div class="item removed"><span class="n" id="removed-count">0</span>removed</div>
+        </div>
+
+        <div id="warnings-box" style="display:none" class="warning-box">
+          <strong id="warnings-title"></strong>
+          <ul id="warnings-list"></ul>
+        </div>
+
+        <div style="display:flex; gap:10px; margin-top:16px">
+          <button class="btn btn-primary" id="publish-btn">Publish — make this the live catalog</button>
+          <button class="btn btn-danger" id="discard-btn">Discard</button>
+        </div>
+        <p class="form-error" id="publish-error"></p>
+        <p class="small-muted" id="publish-success" style="display:none;color:var(--status-good);font-weight:600"></p>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <p class="card-title">Added</p>
+          <div id="added-list"></div>
+        </div>
+        <div class="card">
+          <p class="card-title">Price changes</p>
+          <div id="updated-list"></div>
+        </div>
+      </div>
+
+      <div class="card" id="removed-card" style="display:none">
+        <p class="card-title">Removed</p>
+        <p class="card-subtitle">In the live catalog but not in this sheet. Publishing will drop these.</p>
+        <div id="removed-list"></div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script type="module">
+  import { apiFetch, wireShellChrome, escapeHtml, formatRupees } from "/dashboard/js/common.js";
+
+  await wireShellChrome();
+
+  const dropzone = document.getElementById("dropzone");
+  const dropzoneLabel = document.getElementById("dropzone-label");
+  const fileInput = document.getElementById("file-input");
+  const uploadError = document.getElementById("upload-error");
+  let currentVersion = null;
+
+  dropzone.addEventListener("click", () => fileInput.click());
+  dropzone.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    dropzone.classList.add("dragover");
+  });
+  dropzone.addEventListener("dragleave", () => dropzone.classList.remove("dragover"));
+  dropzone.addEventListener("drop", (e) => {
+    e.preventDefault();
+    dropzone.classList.remove("dragover");
+    if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+  });
+  fileInput.addEventListener("change", () => {
+    if (fileInput.files.length) handleFile(fileInput.files[0]);
+  });
+
+  async function handleFile(file) {
+    uploadError.style.display = "none";
+    dropzoneLabel.innerHTML = `Parsing <strong>${escapeHtml(file.name)}</strong>…`;
+    document.getElementById("review-section").style.display = "none";
+
+    const formData = new FormData();
+    formData.append("file", file);
+
+    try {
+      const version = await apiFetch("/api/admin/catalog/upload", { method: "POST", body: formData });
+      currentVersion = version;
+      dropzoneLabel.innerHTML = `<strong>${escapeHtml(file.name)}</strong> parsed — see the review below, or choose a different file`;
+      renderReview(version);
+    } catch (err) {
+      dropzoneLabel.innerHTML = `<strong>Click to choose a file</strong> or drag one here`;
+      uploadError.textContent = err.message;
+      uploadError.style.display = "block";
+    }
+  }
+
+  function renderReview(version) {
+    const diff = version.diff || {};
+    document.getElementById("review-section").style.display = "block";
+    document.getElementById("review-subtitle").textContent =
+      `${version.perfume_count} perfumes total in "${version.source_filename}" — nothing is live yet.`;
+    document.getElementById("added-count").textContent = diff.added_count ?? 0;
+    document.getElementById("updated-count").textContent = diff.updated_count ?? 0;
+    document.getElementById("removed-count").textContent = diff.removed_count ?? 0;
+
+    const warnings = version.parse_warnings || [];
+    const warningsBox = document.getElementById("warnings-box");
+    if (warnings.length) {
+      warningsBox.style.display = "block";
+      document.getElementById("warnings-title").textContent =
+        `${warnings.length} row${warnings.length === 1 ? "" : "s"} needed attention (not guessed — check the source sheet):`;
+      document.getElementById("warnings-list").innerHTML = warnings.map((w) => `<li>${escapeHtml(w)}</li>`).join("");
+    } else {
+      warningsBox.style.display = "none";
+    }
+
+    document.getElementById("added-list").innerHTML = (diff.added || []).length
+      ? `<table class="data-table"><tbody>${diff.added
+          .map((a) => `<tr><td>${escapeHtml(a.display_name)}</td><td class="num">${Object.keys(a.prices).length} sizes</td></tr>`)
+          .join("")}</tbody></table>`
+      : `<div class="empty-state">No new perfumes</div>`;
+
+    document.getElementById("updated-list").innerHTML = (diff.updated || []).length
+      ? `<table class="data-table"><tbody>${diff.updated
+          .map(
+            (u) => `<tr><td>${escapeHtml(u.display_name)}</td><td class="num">${describePriceChange(u.old_prices, u.new_prices)}</td></tr>`
+          )
+          .join("")}</tbody></table>`
+      : `<div class="empty-state">No price changes</div>`;
+
+    const removedCard = document.getElementById("removed-card");
+    if ((diff.removed || []).length) {
+      removedCard.style.display = "block";
+      document.getElementById("removed-list").innerHTML = `<table class="data-table"><tbody>${diff.removed
+        .map((r) => `<tr><td>${escapeHtml(r.display_name)}</td></tr>`)
+        .join("")}</tbody></table>`;
+    } else {
+      removedCard.style.display = "none";
+    }
+
+    document.getElementById("publish-error").style.display = "none";
+    document.getElementById("publish-success").style.display = "none";
+    document.getElementById("publish-btn").disabled = false;
+    document.getElementById("discard-btn").disabled = false;
+  }
+
+  function describePriceChange(oldPrices, newPrices) {
+    const tiers = new Set([...Object.keys(oldPrices || {}), ...Object.keys(newPrices || {})]);
+    const changes = [];
+    for (const tier of tiers) {
+      const oldP = (oldPrices || {})[tier];
+      const newP = (newPrices || {})[tier];
+      if (oldP !== newP) {
+        changes.push(`${tier}: ${oldP ? formatRupees(oldP) : "—"} → ${newP ? formatRupees(newP) : "—"}`);
+      }
+    }
+    return changes.join(", ") || "—";
+  }
+
+  document.getElementById("publish-btn").addEventListener("click", async () => {
+    if (!currentVersion) return;
+    const btn = document.getElementById("publish-btn");
+    btn.disabled = true;
+    btn.textContent = "Publishing…";
+    try {
+      await apiFetch(`/api/admin/catalog/versions/${currentVersion.id}/publish`, { method: "POST" });
+      document.getElementById("publish-success").textContent = "Published — the live bot is now using this catalog.";
+      document.getElementById("publish-success").style.display = "block";
+      document.getElementById("discard-btn").disabled = true;
+    } catch (err) {
+      document.getElementById("publish-error").textContent = err.message;
+      document.getElementById("publish-error").style.display = "block";
+      btn.disabled = false;
+      btn.textContent = "Publish — make this the live catalog";
+    }
+  });
+
+  document.getElementById("discard-btn").addEventListener("click", async () => {
+    if (!currentVersion) return;
+    const btn = document.getElementById("discard-btn");
+    btn.disabled = true;
+    try {
+      await apiFetch(`/api/admin/catalog/versions/${currentVersion.id}/discard`, { method: "POST" });
+      document.getElementById("review-section").style.display = "none";
+      dropzoneLabel.innerHTML = `<strong>Click to choose a file</strong> or drag one here`;
+      currentVersion = null;
+      fileInput.value = "";
+    } catch (err) {
+      document.getElementById("publish-error").textContent = err.message;
+      document.getElementById("publish-error").style.display = "block";
+      btn.disabled = false;
+    }
+  });
+</script>

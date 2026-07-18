@@ -1,0 +1,199 @@
+<title>Overview — Sovereign Scents dashboard</title>
+<link rel="stylesheet" href="/dashboard/css/dashboard.css" />
+
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand">Sovereign Scents<small>Owner dashboard</small></div>
+    <a class="nav-link active" href="/dashboard/index.html">Overview</a>
+    <a class="nav-link" href="/dashboard/gaps.html">Catalog gaps</a>
+    <a class="nav-link" href="/dashboard/upload.html">Upload catalog</a>
+    <a class="nav-link" href="/dashboard/versions.html">Versions</a>
+    <div class="nav-spacer"></div>
+    <div class="nav-foot">
+      <button class="theme-toggle" id="theme-toggle-btn">Toggle theme</button>
+      <button class="theme-toggle" id="logout-btn">Log out</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="page-header">
+      <div>
+        <h1>Overview</h1>
+        <p>Bot query volume, match accuracy, and catalog composition.</p>
+      </div>
+      <div class="pill-group" id="period-picker">
+        <button data-days="7">7d</button>
+        <button data-days="30" class="active">30d</button>
+        <button data-days="90">90d</button>
+      </div>
+    </div>
+
+    <div class="kpi-row" id="kpi-row">
+      <div class="loading-row">Loading metrics…</div>
+    </div>
+
+    <div class="grid-2">
+      <div class="card">
+        <p class="card-title">Queries by outcome</p>
+        <p class="card-subtitle">Daily WhatsApp queries, split by how the matcher resolved them.</p>
+        <div id="timeseries-legend"></div>
+        <div id="timeseries-chart"><div class="loading-row">Loading…</div></div>
+      </div>
+
+      <div class="card">
+        <p class="card-title">Catalog composition</p>
+        <p class="card-subtitle">The live catalog right now.</p>
+        <div id="catalog-stats"><div class="loading-row">Loading…</div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <p class="card-title">Most-asked perfumes</p>
+      <p class="card-subtitle">Top 15 in the selected period.</p>
+      <div id="top-perfumes"><div class="loading-row">Loading…</div></div>
+    </div>
+
+    <div class="card">
+      <p class="card-title">Price tiers</p>
+      <p class="card-subtitle">Count and price range per decant/bottle size across the live catalog.</p>
+      <div id="price-tiers"><div class="loading-row">Loading…</div></div>
+    </div>
+  </main>
+</div>
+
+<script type="module">
+  import {
+    apiFetch,
+    wireShellChrome,
+    statTileHtml,
+    barListHtml,
+    legendHtml,
+    stackedChartHtml,
+    wireTooltips,
+    formatCompact,
+    formatRupees,
+    escapeHtml,
+  } from "/dashboard/js/common.js";
+
+  await wireShellChrome();
+
+  const OUTCOME_KEYS = ["exact", "fuzzy", "llm", "ambiguous", "unmatched"];
+  let days = 30;
+
+  document.getElementById("period-picker").addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-days]");
+    if (!btn) return;
+    document.querySelectorAll("#period-picker button").forEach((b) => b.classList.remove("active"));
+    btn.classList.add("active");
+    days = Number(btn.dataset.days);
+    loadAll();
+  });
+
+  function renderKpis(overview) {
+    const el = document.getElementById("kpi-row");
+    if (overview === null) {
+      el.innerHTML = `<div class="empty-state">Analytics aren't available yet — connect Supabase (see SUPABASE_SETUP.md) to start collecting query data.</div>`;
+      return;
+    }
+    el.innerHTML = [
+      statTileHtml({ label: `Queries (${overview.period_days}d)`, value: formatCompact(overview.total_queries) }),
+      statTileHtml({
+        label: "Match rate",
+        value: overview.match_rate === null ? "—" : `${overview.match_rate}%`,
+        sub: overview.total_queries ? `${overview.matched} of ${overview.total_queries} matched` : null,
+      }),
+      statTileHtml({
+        label: "Unmatched rate",
+        value: overview.unmatched_rate === null ? "—" : `${overview.unmatched_rate}%`,
+        sub: overview.unmatched ? `${overview.unmatched} queries the bot couldn't answer` : "None — nice",
+        subClass: overview.unmatched ? "bad" : "good",
+      }),
+      statTileHtml({ label: "Catalog size", value: formatCompact(overview.catalog_size) }),
+    ].join("");
+  }
+
+  function renderTimeseries(rows) {
+    document.getElementById("timeseries-legend").innerHTML = legendHtml(OUTCOME_KEYS);
+    const chartEl = document.getElementById("timeseries-chart");
+    chartEl.innerHTML = stackedChartHtml(rows, OUTCOME_KEYS);
+    wireTooltips(chartEl);
+  }
+
+  function renderTopPerfumes(items) {
+    document.getElementById("top-perfumes").innerHTML = barListHtml(items, { labelKey: "display_name", valueKey: "count" });
+  }
+
+  function renderCatalogStats(stats) {
+    const el = document.getElementById("catalog-stats");
+    el.innerHTML =
+      `<div class="kpi-row" style="grid-template-columns:1fr 1fr;margin-bottom:10px">` +
+      statTileHtml({ label: "Clones", value: formatCompact(stats.clones) }) +
+      statTileHtml({ label: "Originals", value: formatCompact(stats.originals) }) +
+      `</div>` +
+      (stats.missing_full_bottle
+        ? `<p class="small-muted">${stats.missing_full_bottle} perfumes have no full-bottle price listed.</p>`
+        : "") +
+      (stats.brand_breakdown
+        ? `<p class="card-subtitle" style="margin-top:14px">Top brands</p>` +
+          barListHtml(stats.brand_breakdown.slice(0, 8), { labelKey: "brand", valueKey: "count", color: "var(--series-2)" })
+        : `<p class="small-muted" style="margin-top:14px">Brand breakdown unlocks after the next catalog upload (older entries don't have a separate brand field yet).</p>`);
+  }
+
+  function renderPriceTiers(tiers) {
+    const el = document.getElementById("price-tiers");
+    if (!tiers.length) {
+      el.innerHTML = `<div class="empty-state">No pricing data.</div>`;
+      return;
+    }
+    el.innerHTML = `
+      <table class="data-table">
+        <thead><tr><th>Size</th><th class="num">Count</th><th class="num">Min</th><th class="num">Avg</th><th class="num">Max</th></tr></thead>
+        <tbody>
+          ${tiers
+            .map(
+              (t) => `<tr>
+                <td>${escapeHtml(t.tier)}</td>
+                <td class="num">${t.count}</td>
+                <td class="num">${formatRupees(t.min)}</td>
+                <td class="num">${formatRupees(t.avg)}</td>
+                <td class="num">${formatRupees(t.max)}</td>
+              </tr>`
+            )
+            .join("")}
+        </tbody>
+      </table>`;
+  }
+
+  async function loadAll() {
+    document.getElementById("kpi-row").innerHTML = `<div class="loading-row">Loading metrics…</div>`;
+
+    let overview = null;
+    try {
+      overview = await apiFetch(`/api/admin/metrics/overview?days=${days}`);
+    } catch (err) {
+      if (err.message && err.message.includes("not configured")) {
+        renderKpis(null);
+      } else {
+        document.getElementById("kpi-row").innerHTML = `<div class="empty-state">${escapeHtml(err.message)}</div>`;
+      }
+    }
+    if (overview) renderKpis(overview);
+
+    try {
+      const [timeseries, topPerfumes, catalogStats, priceTiers] = await Promise.all([
+        apiFetch(`/api/admin/metrics/timeseries?days=${days}`).catch(() => []),
+        apiFetch(`/api/admin/metrics/top-perfumes?days=${days}&limit=15`).catch(() => []),
+        apiFetch(`/api/admin/metrics/catalog-stats`),
+        apiFetch(`/api/admin/metrics/catalog-stats`).then((s) => s.price_tiers),
+      ]);
+      renderTimeseries(timeseries);
+      renderTopPerfumes(topPerfumes);
+      renderCatalogStats(catalogStats);
+      renderPriceTiers(priceTiers);
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
+  loadAll();
+</script>

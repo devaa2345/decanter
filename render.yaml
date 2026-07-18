@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: decanter-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: AISENSY_API_KEY
+        sync: false
+      - key: AISENSY_WEBHOOK_SECRET
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: OWNER_EMAIL
+        sync: false
+      - key: FUZZY_THRESHOLD
+        value: "80"
+      - key: MAX_MESSAGE_LENGTH
+        value: "500"
+      - key: DEDUP_TTL_SECONDS
+        value: "300"

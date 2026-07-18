@@ -1,0 +1,124 @@
+<title>Catalog gaps — Sovereign Scents dashboard</title>
+<link rel="stylesheet" href="/dashboard/css/dashboard.css" />
+
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand">Sovereign Scents<small>Owner dashboard</small></div>
+    <a class="nav-link" href="/dashboard/index.html">Overview</a>
+    <a class="nav-link active" href="/dashboard/gaps.html">Catalog gaps</a>
+    <a class="nav-link" href="/dashboard/upload.html">Upload catalog</a>
+    <a class="nav-link" href="/dashboard/versions.html">Versions</a>
+    <div class="nav-spacer"></div>
+    <div class="nav-foot">
+      <button class="theme-toggle" id="theme-toggle-btn">Toggle theme</button>
+      <button class="theme-toggle" id="logout-btn">Log out</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="page-header">
+      <div>
+        <h1>Catalog gaps</h1>
+        <p>What customers asked that the bot couldn't answer cleanly — the direct feed for what to add or fix next.</p>
+      </div>
+      <div class="pill-group" id="period-picker">
+        <button data-days="7">7d</button>
+        <button data-days="30" class="active">30d</button>
+        <button data-days="90">90d</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <p class="card-title">Unmatched queries</p>
+      <p class="card-subtitle">The bot found no perfume at all — usually means it's missing from the catalog, or the keywords need work.</p>
+      <div id="unmatched-table"><div class="loading-row">Loading…</div></div>
+    </div>
+
+    <div class="card">
+      <p class="card-title">Ambiguous queries</p>
+      <p class="card-subtitle">The message matched two or more perfumes with similar confidence — usually a keyword collision worth tightening.</p>
+      <div id="ambiguous-table"><div class="loading-row">Loading…</div></div>
+    </div>
+  </main>
+</div>
+
+<script type="module">
+  import { apiFetch, wireShellChrome, escapeHtml, formatDateTime } from "/dashboard/js/common.js";
+
+  await wireShellChrome();
+
+  let days = 30;
+
+  document.getElementById("period-picker").addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-days]");
+    if (!btn) return;
+    document.querySelectorAll("#period-picker button").forEach((b) => b.classList.remove("active"));
+    btn.classList.add("active");
+    days = Number(btn.dataset.days);
+    loadAll();
+  });
+
+  function renderUnmatched(rows) {
+    const el = document.getElementById("unmatched-table");
+    if (!rows.length) {
+      el.innerHTML = `<div class="empty-state">No unmatched queries in this period.</div>`;
+      return;
+    }
+    el.innerHTML = `
+      <table class="data-table">
+        <thead><tr><th>Message</th><th class="num">Times asked</th><th>Last seen</th></tr></thead>
+        <tbody>
+          ${rows
+            .map(
+              (r) => `<tr>
+                <td>${escapeHtml(r.message_text)}</td>
+                <td class="num">${r.count}</td>
+                <td>${formatDateTime(r.last_seen)}</td>
+              </tr>`
+            )
+            .join("")}
+        </tbody>
+      </table>`;
+  }
+
+  function renderAmbiguous(rows) {
+    const el = document.getElementById("ambiguous-table");
+    if (!rows.length) {
+      el.innerHTML = `<div class="empty-state">No ambiguous queries in this period.</div>`;
+      return;
+    }
+    el.innerHTML = `
+      <table class="data-table">
+        <thead><tr><th>Message</th><th>When</th></tr></thead>
+        <tbody>
+          ${rows
+            .map(
+              (r) => `<tr>
+                <td>${escapeHtml(r.message_text)}</td>
+                <td>${formatDateTime(r.created_at)}</td>
+              </tr>`
+            )
+            .join("")}
+        </tbody>
+      </table>`;
+  }
+
+  async function loadAll() {
+    document.getElementById("unmatched-table").innerHTML = `<div class="loading-row">Loading…</div>`;
+    document.getElementById("ambiguous-table").innerHTML = `<div class="loading-row">Loading…</div>`;
+    try {
+      const [unmatched, ambiguous] = await Promise.all([
+        apiFetch(`/api/admin/metrics/unmatched?days=${days}&limit=100`),
+        apiFetch(`/api/admin/metrics/ambiguous?days=${days}&limit=100`),
+      ]);
+      renderUnmatched(unmatched);
+      renderAmbiguous(ambiguous);
+    } catch (err) {
+      const msg = `<div class="empty-state">${escapeHtml(err.message)}</div>`;
+      document.getElementById("unmatched-table").innerHTML = msg;
+      document.getElementById("ambiguous-table").innerHTML = msg;
+    }
+  }
+
+  loadAll();
+</script>

@@ -1,0 +1,104 @@
+<title>Catalog versions — Sovereign Scents dashboard</title>
+<link rel="stylesheet" href="/dashboard/css/dashboard.css" />
+
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand">Sovereign Scents<small>Owner dashboard</small></div>
+    <a class="nav-link" href="/dashboard/index.html">Overview</a>
+    <a class="nav-link" href="/dashboard/gaps.html">Catalog gaps</a>
+    <a class="nav-link" href="/dashboard/upload.html">Upload catalog</a>
+    <a class="nav-link active" href="/dashboard/versions.html">Versions</a>
+    <div class="nav-spacer"></div>
+    <div class="nav-foot">
+      <button class="theme-toggle" id="theme-toggle-btn">Toggle theme</button>
+      <button class="theme-toggle" id="logout-btn">Log out</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="page-header">
+      <div>
+        <h1>Catalog versions</h1>
+        <p>Every upload ever reviewed, published, or discarded. Roll back to any past published version instantly.</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div id="versions-table"><div class="loading-row">Loading…</div></div>
+    </div>
+  </main>
+</div>
+
+<script type="module">
+  import { apiFetch, wireShellChrome, escapeHtml, formatDateTime } from "/dashboard/js/common.js";
+
+  await wireShellChrome();
+
+  function statusBadge(v) {
+    if (v.is_active) return `<span class="badge good">Live</span>`;
+    if (v.status === "published") return `<span class="badge neutral">Published (not live)</span>`;
+    if (v.status === "pending") return `<span class="badge warning">Pending review</span>`;
+    return `<span class="badge critical">Discarded</span>`;
+  }
+
+  async function rollback(id, btn) {
+    btn.disabled = true;
+    btn.textContent = "Rolling back…";
+    try {
+      await apiFetch(`/api/admin/catalog/versions/${id}/rollback`, { method: "POST" });
+      await load();
+    } catch (err) {
+      alert(err.message);
+      btn.disabled = false;
+      btn.textContent = "Roll back to this";
+    }
+  }
+
+  async function load() {
+    const el = document.getElementById("versions-table");
+    el.innerHTML = `<div class="loading-row">Loading…</div>`;
+    let versions;
+    try {
+      versions = await apiFetch("/api/admin/catalog/versions?limit=50");
+    } catch (err) {
+      el.innerHTML = `<div class="empty-state">${escapeHtml(err.message)}</div>`;
+      return;
+    }
+
+    if (!versions.length) {
+      el.innerHTML = `<div class="empty-state">No catalog versions yet — upload a sheet to get started, or run scripts/seed_catalog.py to seed from the bundled catalog.</div>`;
+      return;
+    }
+
+    el.innerHTML = `
+      <table class="data-table">
+        <thead><tr><th>File</th><th>Status</th><th class="num">Perfumes</th><th class="num">Added</th><th class="num">Updated</th><th class="num">Removed</th><th>Uploaded</th><th></th></tr></thead>
+        <tbody>
+          ${versions
+            .map(
+              (v) => `<tr>
+                <td>${escapeHtml(v.source_filename || "—")}</td>
+                <td>${statusBadge(v)}</td>
+                <td class="num">${v.perfume_count ?? "—"}</td>
+                <td class="num">${v.added_count ?? 0}</td>
+                <td class="num">${v.updated_count ?? 0}</td>
+                <td class="num">${v.removed_count ?? 0}</td>
+                <td>${formatDateTime(v.created_at)}</td>
+                <td>${
+                  v.status === "published" && !v.is_active
+                    ? `<button class="btn" data-rollback="${v.id}">Roll back to this</button>`
+                    : ""
+                }</td>
+              </tr>`
+            )
+            .join("")}
+        </tbody>
+      </table>`;
+
+    el.querySelectorAll("[data-rollback]").forEach((btn) => {
+      btn.addEventListener("click", () => rollback(btn.dataset.rollback, btn));
+    });
+  }
+
+  load();
+</script>

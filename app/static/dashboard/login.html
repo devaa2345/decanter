@@ -1,0 +1,74 @@
+<title>Log in — Sovereign Scents dashboard</title>
+<link rel="stylesheet" href="/dashboard/css/dashboard.css" />
+
+<div class="login-shell">
+  <div class="login-card">
+    <h1>Sovereign Scents</h1>
+    <p class="sub">Owner dashboard — sign in to continue</p>
+
+    <div id="unconfigured-notice" style="display:none">
+      <p class="small-muted">
+        The dashboard isn't connected to Supabase yet. Follow
+        <code>SUPABASE_SETUP.md</code> in the repo, then reload this page.
+      </p>
+    </div>
+
+    <form id="login-form">
+      <div class="field">
+        <label for="email">Email</label>
+        <input id="email" type="email" autocomplete="username" required />
+      </div>
+      <div class="field">
+        <label for="password">Password</label>
+        <input id="password" type="password" autocomplete="current-password" required />
+      </div>
+      <button class="btn btn-primary" type="submit" style="width:100%" id="submit-btn">Log in</button>
+      <p class="form-error" id="error-msg"></p>
+    </form>
+  </div>
+</div>
+
+<script type="module">
+  import { getSupabase, getSession, initTheme } from "/dashboard/js/common.js";
+
+  initTheme();
+
+  const form = document.getElementById("login-form");
+  const errorMsg = document.getElementById("error-msg");
+  const submitBtn = document.getElementById("submit-btn");
+  const unconfiguredNotice = document.getElementById("unconfigured-notice");
+
+  const supabase = await getSupabase();
+
+  if (!supabase) {
+    form.style.display = "none";
+    unconfiguredNotice.style.display = "block";
+  } else {
+    const existing = await getSession();
+    if (existing) {
+      window.location.href = "/dashboard/index.html";
+    }
+  }
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    errorMsg.style.display = "none";
+    submitBtn.disabled = true;
+    submitBtn.textContent = "Logging in…";
+
+    const email = document.getElementById("email").value.trim();
+    const password = document.getElementById("password").value;
+
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+
+    if (error) {
+      errorMsg.textContent = error.message || "Login failed — check your email and password.";
+      errorMsg.style.display = "block";
+      submitBtn.disabled = false;
+      submitBtn.textContent = "Log in";
+      return;
+    }
+
+    window.location.href = "/dashboard/index.html";
+  });
+</script>
