@@ -1,8 +1,9 @@
 """
 In-memory message-ID deduplication cache with TTL.
 
-Prevents replying twice to the same inbound message when AiSensy
-retries webhook delivery. Ephemeral by design — Render restarts
+Prevents replying twice to the same inbound message when Chat Mitra
+retries webhook delivery (it retries non-2xx/timeout responses up to 3
+times). Ephemeral by design — Render restarts
 clear this, which is fine (worst case: one duplicate reply on redeploy).
 """
 

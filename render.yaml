@@ -6,9 +6,9 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     envVars:
-      - key: AISENSY_API_KEY
+      - key: CHATMITRA_API_TOKEN
         sync: false
-      - key: AISENSY_WEBHOOK_SECRET
+      - key: CHATMITRA_WEBHOOK_SECRET
         sync: false
       - key: GROQ_API_KEY
         sync: false

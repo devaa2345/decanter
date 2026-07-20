@@ -1,16 +1,15 @@
 # WhatsApp Perfume Decanter Price-Query Bot Backend
 
-A FastAPI backend that receives inbound WhatsApp messages via AiSensy webhooks, classifies them against a perfume catalog using a 3-layer matching pipeline, and replies with a formatted price card.
+A FastAPI backend that receives inbound WhatsApp messages via Chat Mitra webhooks, classifies them against a perfume catalog using a 3-layer matching pipeline, and replies with a formatted price card.
 
 ---
 
 ## User Review Required
 
-> [!IMPORTANT]
-> **AiSensy API integration is based on best-effort research, not confirmed documentation.** AiSensy does not publish a fully open API spec. The webhook payload shape and session-message endpoint documented below are based on web research and community references. **Before go-live, the business owner MUST confirm:**
-> 1. The exact inbound webhook JSON payload by sending a test message and inspecting the received POST body.
-> 2. Whether `POST https://api.aisensy.io/v1/messages` with `type: "text"` is the correct endpoint for session replies (vs. the older `backend.aisensy.com/campaign/...` endpoint which is template-only).
-> 3. Whether AiSensy provides a webhook signing secret / signature header for verification.
+> [!NOTE]
+> **Update (migration to Chat Mitra):** the bot originally integrated with AiSensy, whose API shape had to be guessed from web research (see the superseded warning this replaced, below). It has since been fully migrated to [Chat Mitra](https://chatmitra.com/documentation/whatsapp-business-api/), whose endpoint, payload shapes, and webhook signature scheme are all explicitly documented — nothing about the integration below is a guess anymore. See `CHATMITRA_SETUP.md` for the account setup steps (API token, webhook creation) still required before go-live.
+>
+> ~~AiSensy API integration is based on best-effort research, not confirmed documentation. AiSensy does not publish a fully open API spec. Before go-live, the business owner MUST confirm the exact inbound webhook JSON payload, the correct endpoint for session replies, and whether AiSensy provides a webhook signing secret.~~ (superseded — see above)
 
 > [!WARNING]
 > **Placeholder prices only.** The catalog shipped with this build contains example perfumes with made-up prices. The real catalog (keywords, aliases, confirmed prices for all 7 size tiers) must be supplied by the business owner before launch. Do NOT go live with placeholder prices.
@@ -24,7 +23,7 @@ A FastAPI backend that receives inbound WhatsApp messages via AiSensy webhooks, 
 > **Q2 — Full price card vs. single-size reply:** The spec says we may always send the full card (all sizes) even if a specific size is asked about, and to default to "send the full card" if unconfirmed. **Defaulting to**: always send the full price card.
 
 > [!IMPORTANT]
-> **Q3 — AiSensy webhook signature verification:** Research suggests AiSensy may or may not provide a signing secret. The code will include an **optional** HMAC verification layer that activates only when `AISENSY_WEBHOOK_SECRET` is set in the environment. If AiSensy doesn't offer this feature, leave that env var unset and the check is skipped.
+> **Q3 — Webhook signature verification (resolved by the Chat Mitra migration):** Chat Mitra's documentation confirms a signing secret (`X-Webhook-Signature`, HMAC-SHA256 hex digest of the raw body). The code includes an HMAC verification layer that activates when `CHATMITRA_WEBHOOK_SECRET` is set — set it (see `CHATMITRA_SETUP.md`) before go-live; leaving it unset only skips verification for local dev convenience.
 
 ---
 
@@ -40,7 +39,7 @@ decanter/
 │   ├── catalog.py            # Perfume catalog data + shipping card (the ONLY file to edit for prices)
 │   ├── matcher.py            # 3-layer matching pipeline (exact → fuzzy → LLM)
 │   ├── formatter.py          # Build the WhatsApp reply text from matched perfume data
-│   ├── aisensy.py            # AiSensy send-message client
+│   ├── chatmitra.py           # Chat Mitra send-message client
 │   ├── groq_client.py        # Groq LLM classification client
 │   ├── config.py             # Settings loaded from environment variables
 │   └── dedup.py              # In-memory message-ID deduplication cache with TTL
@@ -48,7 +47,7 @@ decanter/
 │   ├── __init__.py
 │   ├── test_matcher.py       # Unit tests for the matching pipeline
 │   ├── test_formatter.py     # Unit tests for reply formatting
-│   └── test_webhook.py       # Integration tests for the webhook endpoint (mocked AiSensy)
+│   └── test_webhook.py       # Integration tests for the webhook endpoint (mocked Chat Mitra)
 ├── requirements.txt          # Pinned dependencies
 ├── .env.example              # All required env vars documented
 ├── render.yaml               # Render deployment blueprint
@@ -121,25 +120,25 @@ Implements the 3-layer pipeline per spec §6:
 
 ---
 
-### AiSensy integration
+### Chat Mitra integration
 
-#### [NEW] [aisensy.py](file:///c:/Users/ABC/Downloads/decanter/app/aisensy.py)
+#### [chatmitra.py](app/chatmitra.py)
 
 - `send_reply(to: str, message_text: str) → bool`
-- Calls `POST https://api.aisensy.io/v1/messages` with:
+- Calls `POST https://backend.chatmitra.com/developer/api/send_message` with:
   ```json
   {
-    "to": "<phone_number>",
-    "type": "text",
-    "text": { "body": "<message_text>" }
+    "recipient_mobile_number": "<phone_number>",
+    "messages": [{"kind": "raw", "payload": {"type": "text", "text": {"body": "<message_text>"}}}]
   }
   ```
-- Headers: `Authorization: Bearer <AISENSY_API_KEY>`, `Content-Type: application/json`.
+- Headers: `Authorization: Bearer <CHATMITRA_API_TOKEN>`, `Content-Type: application/json`.
+- Success is **HTTP 202** (`response.is_success`, not a hardcoded `== 200`) with body `{"status": "success", "jobId": "..."}` — the `jobId` is logged for support/debugging.
+- Only sends "raw" (session) text messages — always valid here since we only ever reply within the 24-hour window a customer's own inbound message just opened.
 - Returns `True` on success, logs full error details on failure.
 - Uses `httpx.AsyncClient` with a 10-second timeout.
 
-> [!WARNING]
-> This endpoint/payload is based on research, not confirmed AiSensy docs. It must be verified before go-live. The code will be structured so swapping the endpoint or payload shape is a single-file change.
+Confirmed directly from [Chat Mitra's documentation](https://chatmitra.com/documentation/whatsapp-business-api/api-reference-docs/) — see `CHATMITRA_SETUP.md` for the account-side setup (API token, webhook creation).
 
 ---
 
@@ -159,8 +158,8 @@ Implements the 3-layer pipeline per spec §6:
 #### [NEW] [config.py](file:///c:/Users/ABC/Downloads/decanter/app/config.py)
 
 Pydantic `BaseSettings` class loading from environment:
-- `AISENSY_API_KEY` (required)
-- `AISENSY_WEBHOOK_SECRET` (optional — enables HMAC verification if set)
+- `CHATMITRA_API_TOKEN` (required)
+- `CHATMITRA_WEBHOOK_SECRET` (optional — enables HMAC verification if set)
 - `GROQ_API_KEY` (required)
 - `FUZZY_THRESHOLD` (default: 80)
 - `MAX_MESSAGE_LENGTH` (default: 500 — reject messages longer than this)
@@ -187,37 +186,39 @@ Pydantic `BaseSettings` class loading from environment:
 
 **`POST /webhook`** — the core handler:
 
-1. **Verify signature** (if `AISENSY_WEBHOOK_SECRET` is set): check HMAC header, reject 403 if invalid.
-2. **Parse payload**: extract `message_id`, `from` (sender phone), `message_type`, `message_text`. Use defensive parsing — if any required field is missing, log and return 200 (don't retry).
-3. **Sanity checks**: reject if message too long (`MAX_MESSAGE_LENGTH`), if message type is not text → send `NON_TEXT_MESSAGE` reply.
-4. **Dedup**: if `is_duplicate(message_id)` → return 200 silently.
-5. **Match**: call `match_perfume(message_text)` (the 3-layer pipeline).
-6. **Build reply**:
+1. **Verify signature** (if `CHATMITRA_WEBHOOK_SECRET` is set): check the `X-Webhook-Signature` HMAC header, reject 403 if invalid.
+2. **Parse payload**: ignore anything where `event != "message.received"` (Chat Mitra also delivers `message.sent`/`message.failed`/`message.status.updated` to the same URL if subscribed). Otherwise extract `message_id`, `from` (sender phone), `message.type`, `message.text`.
+3. **Order-confirmation short-circuit**: the website's "confirm my order" template (see `app/order_confirmation.py`) skips the matcher entirely — checked before the length cutoff since an order with many line items can be long.
+4. **Sanity checks**: reject if message too long (`MAX_MESSAGE_LENGTH`), if message type is not text → send `NON_TEXT_MESSAGE` reply.
+5. **Dedup**: if `is_duplicate(message_id)` → return 200 silently. This runs ahead of every reply-sending branch, which matters here — Chat Mitra retries non-2xx/timeout responses up to 3 times.
+6. **Match**: call `match_perfume(message_text)` (the 3-layer pipeline).
+7. **Build reply**:
    - If `ambiguous` → send `AMBIGUOUS_MESSAGE`.
    - If `perfume_id` is `None` → send `FALLBACK_MESSAGE`.
    - Otherwise → send `build_price_card(perfume_id)`.
-7. **Send reply** via `aisensy.send_reply(from, reply_text)`.
-8. **Log**: message text, match result (perfume_id / layer / confidence / ambiguous), success/failure of send. Use Python `logging` to stdout (Render captures stdout logs).
-9. **Return 200** immediately (AiSensy expects a fast ack).
+8. **Send reply** via `chatmitra.send_reply(from, reply_text)`.
+9. **Log**: message text, match result (perfume_id / layer / confidence / ambiguous), success/failure of send — to stdout (Render captures it) and, if Supabase is configured, to `message_events` for the analytics dashboard.
+10. **Return 200** immediately (Chat Mitra expects a fast ack, and retries on timeout).
 
-Processing is synchronous in the FastAPI async handler (the matching pipeline is CPU-bound and fast; the Groq call has a ~1-2s timeout; the AiSensy send is one HTTP call). If latency becomes an issue, we can move to `BackgroundTasks` — but for this scale (single user's WhatsApp), synchronous is simpler and sufficient.
+Processing is synchronous in the FastAPI async handler (the matching pipeline is CPU-bound and fast; the Groq call has a ~1-2s timeout; the Chat Mitra send is one HTTP call). If latency becomes an issue, we can move to `BackgroundTasks` — but for this scale (single user's WhatsApp), synchronous is simpler and sufficient.
 
-**Webhook payload structure** (best-effort based on research — must be verified):
+**Webhook payload structure** (confirmed from [Chat Mitra's webhook documentation](https://chatmitra.com/documentation/whatsapp-business-api/webhooks/)):
 ```json
 {
-  "id": "wamid.xxxxx",
-  "timestamp": "1688000000",
+  "event": "message.received",
+  "message_id": "wamid_abc123",
+  "direction": "inbound",
   "from": "919876543210",
+  "to": "919888888888",
+  "timestamp": 1705329000,
   "message": {
     "type": "text",
-    "text": {
-      "body": "how much for 10ml sauvage"
-    }
+    "text": "how much for 10ml sauvage"
   }
 }
 ```
 
-The parser will be written defensively with multiple fallback field paths to handle potential payload variations.
+Unlike the old AiSensy integration, this is one confirmed flat shape, not a multi-format guess — `app/main.py`'s `_extract_message_data` parses it directly instead of defensively trying several possible structures.
 
 ---
 
@@ -234,13 +235,15 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     envVars:
-      - key: AISENSY_API_KEY
+      - key: CHATMITRA_API_TOKEN
         sync: false
       - key: GROQ_API_KEY
         sync: false
-      - key: AISENSY_WEBHOOK_SECRET
+      - key: CHATMITRA_WEBHOOK_SECRET
         sync: false
 ```
+
+(The deployed `render.yaml` also lists the Supabase dashboard/analytics env vars — see `SUPABASE_SETUP.md` — omitted here since this section predates that feature.)
 
 #### [NEW] [requirements.txt](file:///c:/Users/ABC/Downloads/decanter/requirements.txt)
 
@@ -255,14 +258,14 @@ pytest==8.3.3
 pytest-asyncio==0.24.0
 ```
 
-#### [NEW] [.env.example](file:///c:/Users/ABC/Downloads/decanter/.env.example)
+#### [.env.example]
 
 ```env
-# AiSensy API key (from Manage > API Key in AiSensy dashboard)
-AISENSY_API_KEY=your_aisensy_api_key_here
+# Chat Mitra API bearer token (Settings -> API Keys). See CHATMITRA_SETUP.md.
+CHATMITRA_API_TOKEN=your_chatmitra_api_token_here
 
-# Optional: AiSensy webhook signing secret (leave empty if not provided by AiSensy)
-AISENSY_WEBHOOK_SECRET=
+# Chat Mitra webhook signing secret (shown once when the webhook is created)
+CHATMITRA_WEBHOOK_SECRET=
 
 # Groq API key (from console.groq.com)
 GROQ_API_KEY=your_groq_api_key_here
@@ -306,7 +309,7 @@ Standard Python gitignore + `.env`
 #### [NEW] [test_webhook.py](file:///c:/Users/ABC/Downloads/decanter/tests/test_webhook.py)
 
 - Uses FastAPI `TestClient`.
-- Mocks AiSensy send-message call.
+- Mocks the Chat Mitra send-message call.
 - Sends simulated webhook payloads and asserts correct replies are constructed.
 - Tests dedup (same message ID twice → only one reply).
 - Tests non-text message handling.
@@ -325,7 +328,7 @@ Sections:
 5. **How to run tests** (`pytest tests/ -v`)
 6. **How to simulate a webhook call** (documented `curl` command with sample JSON payload)
 7. **Pre-launch checklist** (15-20 items)
-8. **Known limitations** (AiSensy API assumptions, placeholder catalog, fuzzy threshold tuning)
+8. **Known limitations** (placeholder catalog, fuzzy threshold tuning)
 
 ---
 
@@ -350,4 +353,4 @@ All tests must pass before any deployment.
    - Non-text message type → expect typing prompt.
    - Duplicate message ID → expect no duplicate reply.
 4. Verify logs capture match layer and result for each message.
-5. **Before go-live**: owner must test against real AiSensy account to confirm webhook payload shape and send-message API work.
+5. **Before go-live**: owner must test against a real Chat Mitra account (see `CHATMITRA_SETUP.md`) to confirm the live webhook and send-message flow end-to-end — the shapes themselves are already confirmed from documentation, but a live test still catches account-specific config issues (e.g. webhook not subscribed correctly, wrong token).

@@ -150,6 +150,7 @@ export const OUTCOME_COLORS = {
   exact: "var(--series-1)",
   fuzzy: "var(--series-2)",
   llm: "var(--series-3)",
+  order_confirmation: "var(--series-4)",
   ambiguous: "var(--status-warning)",
   unmatched: "var(--status-critical)",
 };
@@ -158,6 +159,7 @@ export const OUTCOME_LABELS = {
   exact: "Exact match",
   fuzzy: "Fuzzy match",
   llm: "AI match",
+  order_confirmation: "Order confirmation",
   ambiguous: "Ambiguous",
   unmatched: "Unmatched",
 };

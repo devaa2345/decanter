@@ -1,8 +1,8 @@
 """
 Integration tests for the webhook endpoint.
 
-Uses FastAPI TestClient to simulate AiSensy webhook payloads.
-Mocks the AiSensy send-message call to avoid real API calls.
+Uses FastAPI TestClient to simulate Chat Mitra webhook payloads.
+Mocks the Chat Mitra send-message call to avoid real API calls.
 """
 
 from unittest.mock import AsyncMock, patch
@@ -33,19 +33,23 @@ def _make_webhook_payload(
     sender: str = "919876543210",
     message_id: str | None = None,
     message_type: str = "text",
+    event: str = "message.received",
 ) -> dict:
-    """Build a simulated AiSensy webhook payload."""
+    """Build a simulated Chat Mitra webhook payload (message.received shape)."""
     import time
 
+    message: dict = {"type": message_type}
+    if message_type == "text":
+        message["text"] = message_text
+
     return {
-        "id": message_id or f"wamid_{int(time.time())}",
+        "event": event,
+        "message_id": message_id or f"wamid_{int(time.time())}",
+        "direction": "inbound",
         "from": sender,
-        "message": {
-            "type": message_type,
-            "text": {
-                "body": message_text,
-            } if message_type == "text" else {},
-        },
+        "to": "919888888888",
+        "timestamp": int(time.time()),
+        "message": message,
     }
 
 
@@ -140,37 +144,70 @@ class TestWebhookHandler:
         assert response.status_code == 200
 
 
-class TestWebhookCloudAPIPayload:
-    """Test with WhatsApp Cloud API nested payload format."""
+class TestOrderConfirmationWebhook:
+    """The website's 'confirm my order' template should short-circuit the matcher."""
+
+    ORDER_MESSAGE = (
+        "Hi Sovereign Scents! 👑 I'd like to confirm my order:\n\n"
+        "🧾 *Order #SS1784385515072433*\n\n"
+        "1. Lancôme Idole Peach 'N Roses | 3ml × 1 = ₹290\n\n"
+        "💰 *Total: ₹370*\n\n"
+        "📋 Order link: https://www.sovereignscents.in/admin/order/"
+        "030a84473e802c7c6cd8f9efea879d86b176390c36511a5ff4a4d9146cd42381"
+    )
 
     @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
-    def test_cloud_api_format(self, mock_send, client):
-        """Should handle WhatsApp Cloud API nested structure."""
-        payload = {
-            "entry": [
-                {
-                    "changes": [
-                        {
-                            "value": {
-                                "messages": [
-                                    {
-                                        "id": "wamid_cloud_123",
-                                        "from": "919876543210",
-                                        "type": "text",
-                                        "text": {"body": "sauvage 5ml price"},
-                                    }
-                                ],
-                                "contacts": [
-                                    {
-                                        "profile": {"name": "Test User"},
-                                    }
-                                ],
-                            }
-                        }
-                    ]
-                }
-            ]
-        }
+    def test_order_confirmation_gets_fixed_reply_not_a_price_card(self, mock_send, client):
+        """It must NOT get a price card for the perfume named in the order line item."""
+        payload = _make_webhook_payload(self.ORDER_MESSAGE)
+        response = client.post("/webhook", json=payload)
+        assert response.status_code == 200
+        mock_send.assert_called_once()
+        reply_text = mock_send.call_args[0][1]
+        assert reply_text == "Thank you for confirming your order! We will contact you shortly!!"
+        assert "₹" not in reply_text  # not a price card
+
+    @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
+    def test_order_confirmation_deduped_like_any_other_message(self, mock_send, client):
+        payload = _make_webhook_payload(self.ORDER_MESSAGE, message_id="order_dup_1")
+        client.post("/webhook", json=payload)
+        client.post("/webhook", json=payload)
+        assert mock_send.call_count == 1
+
+    @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
+    def test_order_confirmation_bypasses_length_limit(self, mock_send, client):
+        """A long order (many line items) must not get rejected by MAX_MESSAGE_LENGTH."""
+        long_order = self.ORDER_MESSAGE + "\n".join(
+            f"{i}. Some Perfume Name Padding | 3ml x 1 = 100" for i in range(2, 40)
+        )
+        assert len(long_order) > 500  # actually exceeds the default length cutoff
+        payload = _make_webhook_payload(long_order)
+        response = client.post("/webhook", json=payload)
+        assert response.status_code == 200
+        reply_text = mock_send.call_args[0][1]
+        assert "Thank you for confirming your order" in reply_text
+
+
+class TestWebhookEventFiltering:
+    """Chat Mitra can deliver non-message.received events to the same URL
+    (message.sent, message.failed, message.status.updated) if subscribed —
+    only message.received is an inbound customer message needing a reply."""
+
+    @pytest.mark.parametrize(
+        "event",
+        ["message.sent", "message.failed", "message.status.updated"],
+    )
+    @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
+    def test_non_received_events_are_ignored(self, mock_send, client, event):
+        payload = _make_webhook_payload("sauvage", event=event)
+        response = client.post("/webhook", json=payload)
+        assert response.status_code == 200
+        mock_send.assert_not_called()
+
+    @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
+    def test_message_received_event_still_works(self, mock_send, client):
+        """Sanity check the parametrized cases above aren't vacuously true."""
+        payload = _make_webhook_payload("sauvage", event="message.received")
         response = client.post("/webhook", json=payload)
         assert response.status_code == 200
         mock_send.assert_called_once()

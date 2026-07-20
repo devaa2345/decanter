@@ -19,6 +19,8 @@ AMBIGUOUS_MESSAGE = (
 
 NON_TEXT_MESSAGE = "Please type your question and I'll help with pricing 🙂"
 
+ORDER_CONFIRMATION_MESSAGE = "Thank you for confirming your order! We will contact you shortly!!"
+
 
 def _format_price(price: int) -> str:
     """Format price with ₹ symbol and comma separators."""

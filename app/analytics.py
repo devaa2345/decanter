@@ -92,7 +92,11 @@ async def get_overview(days: int = 30) -> dict:
     total = len(events)
     matched = sum(1 for e in events if e.get("perfume_id") and not e.get("ambiguous"))
     ambiguous = sum(1 for e in events if e.get("ambiguous"))
-    unmatched = total - matched - ambiguous
+    order_confirmations = sum(1 for e in events if e.get("layer") == "order_confirmation")
+    # Order confirmations are a distinct message type, not a failed price
+    # lookup — excluded here so they don't deflate the match rate or look
+    # like catalog gaps (see get_unmatched_queries).
+    unmatched = total - matched - ambiguous - order_confirmations
 
     from app.catalog import PERFUMES
 
@@ -102,6 +106,7 @@ async def get_overview(days: int = 30) -> dict:
         "matched": matched,
         "ambiguous": ambiguous,
         "unmatched": unmatched,
+        "order_confirmations": order_confirmations,
         "match_rate": round(matched / total * 100, 1) if total else None,
         "unmatched_rate": round(unmatched / total * 100, 1) if total else None,
         "catalog_size": len(PERFUMES),
@@ -120,7 +125,9 @@ async def get_timeseries(days: int = 30) -> list[dict]:
         if not day:
             continue
         bucket = buckets.setdefault(day, Counter())
-        if e.get("ambiguous"):
+        if e.get("layer") == "order_confirmation":
+            bucket["order_confirmation"] += 1
+        elif e.get("ambiguous"):
             bucket["ambiguous"] += 1
         elif e.get("perfume_id"):
             bucket[e.get("layer") or "exact"] += 1
@@ -135,6 +142,7 @@ async def get_timeseries(days: int = 30) -> list[dict]:
             "llm": c.get("llm", 0),
             "ambiguous": c.get("ambiguous", 0),
             "unmatched": c.get("unmatched", 0),
+            "order_confirmation": c.get("order_confirmation", 0),
             "total": sum(c.values()),
         }
         for day, c in sorted(buckets.items())
@@ -176,7 +184,13 @@ async def get_unmatched_queries(days: int = 30, limit: int = 50) -> list[dict]:
     since = datetime.now(timezone.utc) - timedelta(days=days)
     events = await asyncio.to_thread(_fetch_events_since, client, since)
 
-    unmatched = [e for e in events if not e.get("perfume_id") and not e.get("ambiguous")]
+    unmatched = [
+        e
+        for e in events
+        if not e.get("perfume_id")
+        and not e.get("ambiguous")
+        and e.get("layer") != "order_confirmation"
+    ]
 
     groups: dict[str, dict] = {}
     for e in unmatched:

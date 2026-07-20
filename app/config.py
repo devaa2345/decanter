@@ -9,12 +9,15 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
-    # AiSensy API key (required for sending replies)
-    AISENSY_API_KEY: str = ""
+    # Chat Mitra API bearer token (Settings -> API Keys in their dashboard).
+    # Required for sending replies.
+    CHATMITRA_API_TOKEN: str = ""
 
-    # Optional: AiSensy webhook signing secret for HMAC verification.
-    # If empty/unset, webhook signature verification is skipped.
-    AISENSY_WEBHOOK_SECRET: str = ""
+    # Chat Mitra webhook signing secret (shown once when the webhook is
+    # created — see CHATMITRA_SETUP.md). Required for HMAC-SHA256 signature
+    # verification of inbound webhooks. If empty/unset, verification is
+    # skipped (local dev only — must be set before go-live).
+    CHATMITRA_WEBHOOK_SECRET: str = ""
 
     # Groq API key (required for LLM classification fallback)
     GROQ_API_KEY: str = ""
@@ -54,6 +57,11 @@ class Settings(BaseSettings):
         "env_file": ".env",
         "env_file_encoding": "utf-8",
         "case_sensitive": True,
+        # BaseSettings forbids unrecognized keys by default, so any stray
+        # local note in .env (e.g. a reminder of a dashboard login password —
+        # never read by this app; Supabase Auth checks it client-side) would
+        # otherwise crash the whole app on startup. Ignore instead of forbid.
+        "extra": "ignore",
     }
 
 
