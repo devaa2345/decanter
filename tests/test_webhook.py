@@ -172,11 +172,22 @@ class TestWebhookHandler:
         assert "Prepaid" in reply_text  # Should contain shipping
 
     @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
-    def test_unknown_message_gets_fallback(self, mock_send, client):
-        """An unrecognizable message should get a fallback reply."""
+    def test_unrecognizable_message_stays_silent(self, mock_send, client):
+        """Gibberish that isn't a greeting/catalog request and doesn't match
+        a perfume should NOT get a reply — silence by default, so the bot
+        doesn't spend a Chat Mitra credit on messages worth nothing."""
         payload = _make_webhook_payload("asdfghjkl random nonsense xyz")
         response = client.post("/webhook", json=payload)
         assert response.status_code == 200
+        mock_send.assert_not_called()
+
+    @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
+    def test_greeting_gets_fallback_reply(self, mock_send, client):
+        """A plain greeting IS one of the two cases worth replying to."""
+        payload = _make_webhook_payload("hi")
+        response = client.post("/webhook", json=payload)
+        assert response.status_code == 200
+        mock_send.assert_called_once()
         reply_text = mock_send.call_args[0][1]
         assert "perfume" in reply_text.lower() or "🙂" in reply_text
 
@@ -226,6 +237,19 @@ class TestWebhookHandler:
             headers={"content-type": "application/json"},
         )
         assert response.status_code == 200
+
+    @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
+    def test_ambiguous_9pm_lists_all_real_candidates(self, mock_send, client):
+        """A bare '9pm' must get the rich comparison card (real perfume
+        names + prices), not the old content-free 'which one?' message."""
+        payload = _make_webhook_payload("9pm")
+        response = client.post("/webhook", json=payload)
+        assert response.status_code == 200
+        reply_text = mock_send.call_args[0][1]
+        assert "Afnan 9PM Rebel" in reply_text
+        assert "Afnan 9PM Night Out" in reply_text
+        assert "Afnan 9PM Elixir Parfum" in reply_text
+        assert "₹" in reply_text
 
 
 class TestOrderConfirmationWebhook:

@@ -52,8 +52,10 @@ SHIPPING_CARD = (
     # together with 🌸 in the price header, got rejected outright by Chat
     # Mitra's send API ("Text contains invalid characters"). Not isolated
     # further (avoided burning more real send attempts); "-" is confirmed
-    # safe (it's already in the successfully-sent fallback message).
+    # safe (it's already in the successfully-sent fallback message). One
+    # region per line reads more cleanly than the old single-line layout.
     "Prepaid only, no COD\n"
-    "₹65 Delhi NCR - ₹80 Rest of India\n"
-    "₹100 J&K, NE, Lakshadweep & Andaman"
+    "₹65 - Delhi NCR\n"
+    "₹80 - Rest of India\n"
+    "₹100 - J&K, NE, Lakshadweep & Andaman"
 )

@@ -8,6 +8,7 @@ Layer 3: Groq LLM classification (paid, slow — last resort)
 All prices come from catalog.py, NEVER from the LLM.
 """
 
+import functools
 import logging
 import re
 from dataclasses import dataclass
@@ -29,6 +30,10 @@ class MatchResult:
     confidence: float | None = None
     ambiguous: bool = False
     matched_keyword: str | None = None
+    # Populated only when ambiguous=True — the actual candidate perfume_ids,
+    # so the reply can list them instead of just asking "which one?" with
+    # no information to go on.
+    matched_perfume_ids: list[str] | None = None
 
 
 # Common English words that appear as catalog keywords but are too
@@ -47,6 +52,11 @@ GENERIC_STOPWORDS: set[str] = {
     "what", "wild", "wood", "your",
 }
 
+# Family/series terms that are genuinely ambiguous when mentioned alone,
+# with no distinguishing word — see the "not matches" branch in
+# _layer1_exact_match for the confirmed "9pm" case.
+_AMBIGUOUS_FAMILY_TERMS: tuple[str, ...] = ("9pm", "9 pm")
+
 
 def normalize_message(text: str) -> str:
     """Lowercase, strip punctuation/extra whitespace."""
@@ -57,9 +67,24 @@ def normalize_message(text: str) -> str:
     return text
 
 
+@functools.lru_cache(maxsize=None)
+def _keyword_boundary_regex(keyword: str) -> re.Pattern:
+    """
+    Cached compiled word-boundary pattern for a keyword. Word-boundary, not
+    raw substring: confirmed in production that plain `keyword in normalized`
+    lets a keyword match *inside* an unrelated word — the typo "fregrance"
+    contains "egra" (a real keyword for an unrelated perfume, "Rasasi Egra")
+    and matched it. `\\b` ensures a keyword only matches as a whole word (or
+    whole phrase, for multi-word keywords), never embedded in a longer one.
+    """
+    return re.compile(r"\b" + re.escape(keyword) + r"\b")
+
+
 def _layer1_exact_match(normalized: str) -> MatchResult:
     """
-    Layer 1: Check if any perfume's keyword is a substring of the message.
+    Layer 1: Check if any perfume's keyword appears as a whole word/phrase
+    in the message (word-boundary match, not raw substring — see
+    _keyword_boundary_regex).
 
     If multiple perfumes match, prefer the longest/most-specific keyword.
     Only return ambiguous if the customer clearly mentions 2+ distinct
@@ -76,10 +101,36 @@ def _layer1_exact_match(normalized: str) -> MatchResult:
             # Skip single-word generic keywords (e.g. "order", "morning")
             if " " not in keyword and keyword in GENERIC_STOPWORDS:
                 continue
-            if keyword in normalized:
+            if _keyword_boundary_regex(keyword).search(normalized):
                 matches.append((pid, keyword, len(keyword)))
 
     if not matches:
+        # "9pm" alone (no distinguishing word) is genuinely ambiguous among
+        # 4 different Afnan products — Rebel, Night Out, Elixir, and the
+        # base "Afnan 9PM" — confirmed in production ("9pm fragrance" got
+        # no match at all). None of them has a bare "9pm" keyword by
+        # design: adding one would hit the "same keyword -> pick first"
+        # branch below and silently guess one, risking the wrong price. If
+        # the message actually contained one of their real distinguishing
+        # keywords ("rebel", "night out", "9pm elixir", "afnan 9pm", ...),
+        # `matches` wouldn't be empty here at all — this only fires for the
+        # genuinely ambiguous bare mention. Scoped to this one reported,
+        # confirmed case rather than guessing at other series names across
+        # 1200+ perfumes without real customer reports to ground them.
+        if any(
+            _keyword_boundary_regex(term).search(normalized)
+            for term in _AMBIGUOUS_FAMILY_TERMS
+        ):
+            family_pids = [
+                pid
+                for pid, data in PERFUMES.items()
+                if any(
+                    _keyword_boundary_regex(term).search(kw)
+                    for kw in data["keywords"]
+                    for term in _AMBIGUOUS_FAMILY_TERMS
+                )
+            ]
+            return MatchResult(ambiguous=True, matched_perfume_ids=family_pids)
         return MatchResult()
 
     # Sort by keyword length descending (most specific first)
@@ -139,8 +190,11 @@ def _layer1_exact_match(normalized: str) -> MatchResult:
         )
 
     # Different keywords of similar length — likely the customer genuinely
-    # mentioned two different perfumes
-    return MatchResult(ambiguous=True)
+    # mentioned two different perfumes. List every pid tied for the longest
+    # keyword — those are the genuine competing candidates; anything with a
+    # strictly shorter keyword was already outranked and isn't a real option.
+    tied_pids = [pid for pid in sorted_pids if seen_pids[pid][1] == best_len]
+    return MatchResult(ambiguous=True, matched_perfume_ids=tied_pids)
 
 
 

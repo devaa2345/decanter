@@ -43,10 +43,54 @@ ORDER_CONFIRMATION_MESSAGE = "Thank you for confirming your order! We will conta
 
 WILL_CONTACT_LINE = "We'll contact you shortly!"
 
+# Safety cap on how many candidates an ambiguous-match card lists — the
+# known cases (the "9pm" family, a catalog keyword collision) are always a
+# handful, but this guards against ever dumping an unreadably long list.
+_MAX_AMBIGUOUS_CANDIDATES = 8
+
 
 def _format_price(price: int) -> str:
     """Format price with ₹ symbol and comma separators."""
     return f"₹{price:,}"
+
+
+def _price_range(prices: dict) -> str:
+    """Compact 'lowest - highest' price span across every size tier."""
+    values = list(prices.values())
+    if not values:
+        return "price on request"
+    lo, hi = min(values), max(values)
+    return _format_price(lo) if lo == hi else f"{_format_price(lo)} - {_format_price(hi)}"
+
+
+def build_ambiguous_card(perfume_ids: list[str] | None) -> str:
+    """
+    List every genuinely ambiguous candidate (name + price range) instead of
+    just asking "which one?" with no information to go on. Falls back to
+    the plain AMBIGUOUS_MESSAGE if no candidate list was supplied (should
+    only happen for a matcher path that hasn't been taught to populate
+    matched_perfume_ids yet — never a hard failure).
+    """
+    if not perfume_ids:
+        return AMBIGUOUS_MESSAGE
+
+    shown = perfume_ids[:_MAX_AMBIGUOUS_CANDIDATES]
+    lines = ["I found more than one perfume in your message:", ""]
+
+    for i, pid in enumerate(shown, start=1):
+        perfume = PERFUMES.get(pid)
+        if not perfume:
+            continue
+        lines.append(f"{i}. {perfume['display_name']} - {_price_range(perfume.get('prices', {}))}")
+
+    remaining = len(perfume_ids) - len(shown)
+    if remaining > 0:
+        lines.append(f"...and {remaining} more")
+
+    lines.append("")
+    lines.append("Please reply with the exact name of the one you'd like!")
+
+    return "\n".join(lines)
 
 
 def build_price_card(perfume_id: str) -> str:
@@ -66,8 +110,11 @@ def build_price_card(perfume_id: str) -> str:
     # Build the card header — no asterisks (see module docstring) and no
     # leading emoji (🌸 was one of the things suspected before "*" was
     # isolated as the actual cause; left plain since only 📋/🙂 are
-    # individually confirmed safe and neither fits this context).
-    lines = [display_name]
+    # individually confirmed safe and neither fits this context). Uppercase
+    # name + a plain "-" divider (confirmed safe) fakes emphasis without
+    # any markdown Chat Mitra might reject.
+    divider = "-" * min(max(len(display_name), 12), 32)
+    lines = [display_name.upper(), divider]
 
     # Define the standard decant tiers and full bottle tier
     decant_sizes = ["3ml", "5ml", "8ml", "10ml", "20ml", "30ml"]
@@ -107,8 +154,8 @@ def build_price_card(perfume_id: str) -> str:
             else:
                 lines.append(f"Full bottle  {_format_price(prices[size_key])}")
 
-    # Add blank line + shipping card + contact-you closing line
-    lines.append("")
+    # Closing divider + shipping card + contact-you line
+    lines.append(divider)
     lines.append(SHIPPING_CARD)
     lines.append("")
     lines.append(WILL_CONTACT_LINE)

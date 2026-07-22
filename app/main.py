@@ -21,12 +21,13 @@ from app.chatmitra import send_reply
 from app.config import settings
 from app.dedup import dedup_cache
 from app.formatter import (
-    AMBIGUOUS_MESSAGE,
     FALLBACK_MESSAGE,
     NON_TEXT_MESSAGE,
     ORDER_CONFIRMATION_MESSAGE,
+    build_ambiguous_card,
     build_price_card,
 )
+from app.greeting import is_greeting_or_catalog_request
 from app.matcher import match_perfume
 from app.order_confirmation import is_order_confirmation
 from app.routes_admin import router as admin_router
@@ -295,25 +296,40 @@ async def webhook_handler(request: Request):
     # Step 7: Run matching pipeline
     result = await match_perfume(message_text)
 
-    # Step 8: Build reply
+    # Step 8: Build reply — silence by default. Every unmatched message used
+    # to get the catalog fallback, which spends a Chat Mitra conversation
+    # credit on things like "thanks" or "order kab aayega" that aren't
+    # asking about a perfume at all. Now only a greeting/explicit catalog
+    # ask or an actual perfume match gets a reply; anything else stays
+    # silent — but is still logged below so the "catalog gaps" dashboard
+    # still sees what customers asked that the bot didn't answer.
     if result.ambiguous:
-        reply_text = AMBIGUOUS_MESSAGE
+        reply_text = build_ambiguous_card(result.matched_perfume_ids)
     elif result.perfume_id:
         reply_text = build_price_card(result.perfume_id)
-    else:
+    elif is_greeting_or_catalog_request(message_text):
         reply_text = FALLBACK_MESSAGE
+    else:
+        reply_text = None
 
-    # Step 9: Send reply
-    success = await send_reply(sender, reply_text)
-    _log_outbound(
-        sender,
-        reply_text,
-        success,
-        matched=result.perfume_id or "(none)",
-        layer=result.layer or "(none)",
-        confidence=result.confidence,
-        ambiguous=result.ambiguous,
-    )
+    # Step 9: Send reply (skipped entirely when staying silent)
+    if reply_text is not None:
+        success = await send_reply(sender, reply_text)
+        _log_outbound(
+            sender,
+            reply_text,
+            success,
+            matched=result.perfume_id or "(none)",
+            layer=result.layer or "(none)",
+            confidence=result.confidence,
+            ambiguous=result.ambiguous,
+        )
+    else:
+        success = False
+        logger.info(
+            "<<< SILENT  to=%s  (not a greeting/catalog request and no perfume match — no reply sent, no credit spent)",
+            sender,
+        )
 
     # Step 10: Log the event for the analytics dashboard (best-effort, never
     # blocks or fails the customer-facing reply — see app/analytics.py).

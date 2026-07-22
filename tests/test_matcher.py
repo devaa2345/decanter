@@ -22,6 +22,7 @@ from app.catalog import PERFUMES
 from app.matcher import (
     MatchResult,
     _build_ngram_candidates,
+    _keyword_boundary_regex,
     _layer1_exact_match,
     _layer2_fuzzy_match,
     _layer3_llm_match,
@@ -98,6 +99,130 @@ class TestLayer1ExactMatch:
         result = _layer1_exact_match("xyzqwerty asdfgh nothing relevant here at all blah blah")
         assert result.perfume_id is None
         assert result.ambiguous is False
+
+
+class TestWordBoundaryMatching:
+    """
+    Regression guard for a real production bug: Layer 1 used raw substring
+    containment (`if keyword in normalized`), so a keyword could match
+    *inside* an unrelated word. Confirmed concretely: the typo "fregrance"
+    contains "egra", a real keyword for an unrelated perfume ("Rasasi
+    Egra"), and matched it. Word-boundary matching (`\\b...\\b`) fixes this
+    without weakening genuine standalone-word matches.
+    """
+
+    def test_keyword_embedded_in_unrelated_word_does_not_match(self):
+        result = _layer1_exact_match("9pm fregrance")
+        assert result.perfume_id != "rasasiegra"
+
+    def test_keyword_as_a_genuine_standalone_word_still_matches(self):
+        """The fix must not regress real matches — "sauvage" as an actual
+        word in the message still has to match exactly as before."""
+        result = _layer1_exact_match("how much for sauvage 10ml")
+        assert result.perfume_id is not None
+        assert result.layer == "exact"
+
+    def test_multiword_keyword_still_matches(self):
+        result = _layer1_exact_match("club de nuit intense man")
+        assert result.perfume_id is not None
+
+
+class TestNinePMFamilyAmbiguity:
+    """
+    "9pm" alone is genuinely ambiguous among 4 different Afnan products
+    (Rebel, Night Out, Elixir, and the base "Afnan 9PM") — confirmed in
+    production ("9pm fragrance" got no match at all, since none of the four
+    has a bare "9pm" keyword by design). A bare mention should be flagged
+    ambiguous, not silently guess one (risking the wrong price quoted), but
+    mentioning the actual distinguishing word must still resolve precisely.
+    """
+
+    def test_bare_9pm_is_ambiguous(self):
+        result = _layer1_exact_match("9pm")
+        assert result.ambiguous is True
+        assert result.perfume_id is None
+
+    def test_9pm_with_space_variant_is_ambiguous(self):
+        result = _layer1_exact_match("9 pm")
+        assert result.ambiguous is True
+
+    def test_9pm_with_filler_word_is_still_ambiguous(self):
+        result = _layer1_exact_match("9pm fragrance")
+        assert result.ambiguous is True
+
+    def test_9pm_rebel_resolves_precisely(self):
+        result = _layer1_exact_match("9pm rebel")
+        assert result.ambiguous is False
+        assert result.perfume_id == "afnan9pm_rebel"
+
+    def test_9pm_night_out_resolves_precisely(self):
+        result = _layer1_exact_match("9pm night out")
+        assert result.ambiguous is False
+        assert result.perfume_id == "afnan9pm_night_out"
+
+    def test_9pm_elixir_resolves_precisely(self):
+        result = _layer1_exact_match("9pm elixir")
+        assert result.ambiguous is False
+        assert result.perfume_id == "afnan9pm_elixir_parfum"
+
+    def test_afnan_9pm_resolves_to_the_base_product(self):
+        result = _layer1_exact_match("afnan 9pm")
+        assert result.ambiguous is False
+        assert result.perfume_id == "afnanafnan_9pm"
+
+    def test_unrelated_9_number_does_not_trigger_ambiguity(self):
+        """Sanity check: this isn't just "any message containing digit 9" —
+        it's specifically the "9pm" term."""
+        result = _layer1_exact_match("i need 9 bottles")
+        assert result.ambiguous is False
+
+    def test_bare_9pm_lists_all_four_real_candidates(self):
+        """The reply needs actual candidates to list, not just a bare
+        ambiguous flag — this is what lets the bot show a real comparison
+        card instead of a content-free "which one?" message."""
+        result = _layer1_exact_match("9pm")
+        assert result.matched_perfume_ids is not None
+        assert set(result.matched_perfume_ids) == {
+            "afnan9pm_rebel",
+            "afnanafnan_9pm",
+            "afnan9pm_night_out",
+            "afnan9pm_elixir_parfum",
+        }
+
+
+class TestAmbiguousKeywordCollisionCandidates:
+    """
+    The "different keywords, similar length" branch of _layer1_exact_match
+    must also populate matched_perfume_ids — using a controlled synthetic
+    catalog (patched in) rather than hunting for a fragile real-world
+    example, since the exact catalog contents can change on re-upload.
+    """
+
+    def test_tied_length_different_keywords_lists_both_candidates(self):
+        # "crimson" and "emerald" are deliberately the same length (7 chars)
+        # — the ambiguous branch only triggers on a genuine tie; unequal
+        # lengths pick the longer/more-specific one instead (by design).
+        synthetic = {
+            "brandone_crimson": {
+                "display_name": "BrandOne Crimson",
+                "keywords": ["crimson"],
+                "prices": {"3ml": 100},
+                "clone_of": None,
+            },
+            "brandtwo_emerald": {
+                "display_name": "BrandTwo Emerald",
+                "keywords": ["emerald"],
+                "prices": {"3ml": 100},
+                "clone_of": None,
+            },
+        }
+        with patch("app.matcher.PERFUMES", synthetic):
+            _keyword_boundary_regex.cache_clear()
+            result = _layer1_exact_match("crimson emerald combo")
+            _keyword_boundary_regex.cache_clear()  # don't leak into other tests
+
+        assert result.ambiguous is True
+        assert set(result.matched_perfume_ids) == {"brandone_crimson", "brandtwo_emerald"}
 
 
 class TestLayer2FuzzyMatch:

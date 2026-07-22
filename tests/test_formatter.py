@@ -16,6 +16,7 @@ from app.formatter import (
     FALLBACK_MESSAGE,
     NON_TEXT_MESSAGE,
     WILL_CONTACT_LINE,
+    build_ambiguous_card,
     build_price_card,
 )
 from app.catalog import PERFUMES, SHIPPING_CARD
@@ -25,15 +26,16 @@ class TestBuildPriceCard:
     """Test price card formatting."""
 
     def test_valid_perfume_has_plain_name_no_asterisks(self):
-        """Card should contain the display name as plain text — no
-        asterisks. WhatsApp itself renders *word* as bold, but Chat Mitra's
-        send API rejects the literal "*" character outright ("Text contains
-        invalid characters"), confirmed via direct API tests: a lone "*"
-        alone was enough to trigger it, nothing to do with pairing/emoji."""
+        """Card should contain the display name (uppercased for a header
+        effect — see build_price_card) as plain text — no asterisks.
+        WhatsApp itself renders *word* as bold, but Chat Mitra's send API
+        rejects the literal "*" character outright ("Text contains invalid
+        characters"), confirmed via direct API tests: a lone "*" alone was
+        enough to trigger it, nothing to do with pairing/emoji."""
         pid = next(iter(PERFUMES))
         card = build_price_card(pid)
         display_name = PERFUMES[pid]["display_name"]
-        assert display_name in card
+        assert display_name.upper() in card
         assert "*" not in card
 
     def test_valid_perfume_has_shipping(self):
@@ -41,8 +43,8 @@ class TestBuildPriceCard:
         pid = next(iter(PERFUMES))
         card = build_price_card(pid)
         assert "Prepaid only" in card
-        assert "₹65 Delhi NCR" in card
-        assert "₹80 Rest of India" in card
+        assert "₹65 - Delhi NCR" in card
+        assert "₹80 - Rest of India" in card
 
     def test_valid_perfume_has_prices(self):
         """Card should contain price values with ₹ symbol."""
@@ -72,13 +74,14 @@ class TestBuildPriceCard:
         card = build_price_card(pid)
         assert isinstance(card, str)
 
-    def test_card_starts_with_plain_name_no_emoji_or_asterisks(self):
-        """No leading emoji (🌸 was suspected before "*" was isolated as the
+    def test_card_starts_with_uppercase_name_no_emoji_or_asterisks(self):
+        """Uppercased name as a header effect (no markdown/emoji risk), no
+        leading emoji (🌸 was suspected before "*" was isolated as the
         actual cause) and no asterisks anywhere (the confirmed cause)."""
         pid = next(iter(PERFUMES))
         card = build_price_card(pid)
         display_name = PERFUMES[pid]["display_name"]
-        assert card.startswith(display_name)
+        assert card.startswith(display_name.upper())
         for risky_char in ("🌸", "🚚", "|", "*"):
             assert risky_char not in card
 
@@ -98,6 +101,61 @@ class TestBuildPriceCard:
         card = build_price_card(pid)
         assert card.endswith(WILL_CONTACT_LINE)
         assert card.index(SHIPPING_CARD) < card.index(WILL_CONTACT_LINE)
+
+
+class TestBuildAmbiguousCard:
+    """
+    When multiple perfumes are genuinely ambiguous, the reply must list
+    them (name + price range) rather than just asking "which one?" with no
+    information for the customer to act on.
+    """
+
+    def test_lists_every_candidate_with_name_and_price_range(self):
+        pids = list(PERFUMES)[:2]
+        card = build_ambiguous_card(pids)
+        for pid in pids:
+            assert PERFUMES[pid]["display_name"] in card
+        assert "1." in card
+        assert "2." in card
+
+    def test_numbered_in_the_given_order(self):
+        pids = list(PERFUMES)[:3]
+        card = build_ambiguous_card(pids)
+        idx = [card.index(PERFUMES[pid]["display_name"]) for pid in pids]
+        assert idx == sorted(idx)
+
+    def test_price_range_shown_low_to_high(self):
+        pid = next(iter(PERFUMES))
+        card = build_ambiguous_card([pid])
+        prices = PERFUMES[pid]["prices"].values()
+        assert f"₹{min(prices):,}" in card
+        if min(prices) != max(prices):
+            assert f"₹{max(prices):,}" in card
+
+    def test_none_falls_back_to_plain_ambiguous_message(self):
+        assert build_ambiguous_card(None) == AMBIGUOUS_MESSAGE
+
+    def test_empty_list_falls_back_to_plain_ambiguous_message(self):
+        assert build_ambiguous_card([]) == AMBIGUOUS_MESSAGE
+
+    def test_truncates_beyond_the_cap_with_a_count(self):
+        many_pids = list(PERFUMES)[:15]
+        card = build_ambiguous_card(many_pids)
+        assert "more" in card.lower()
+        # Only the capped number of names should actually appear, not all 15
+        shown_names = sum(1 for pid in many_pids if PERFUMES[pid]["display_name"] in card)
+        assert shown_names < len(many_pids)
+
+    def test_ends_with_a_reply_prompt(self):
+        card = build_ambiguous_card([next(iter(PERFUMES))])
+        assert "reply" in card.lower()
+
+    def test_no_asterisks_or_untested_characters(self):
+        pids = list(PERFUMES)[:3]
+        card = build_ambiguous_card(pids)
+        assert "*" not in card
+        for risky_char in ("🌸", "🚚", "|", "#"):
+            assert risky_char not in card
 
 
 class TestFixedMessages:
