@@ -12,8 +12,10 @@ import pytest
 
 from app.formatter import (
     AMBIGUOUS_MESSAGE,
+    CATALOG_SHEET_URL,
     FALLBACK_MESSAGE,
     NON_TEXT_MESSAGE,
+    WILL_CONTACT_LINE,
     build_price_card,
 )
 from app.catalog import PERFUMES, SHIPPING_CARD
@@ -22,13 +24,17 @@ from app.catalog import PERFUMES, SHIPPING_CARD
 class TestBuildPriceCard:
     """Test price card formatting."""
 
-    def test_valid_perfume_has_bold_name(self):
-        """Card should contain the display name in WhatsApp bold."""
-        # Pick the first perfume from catalog
+    def test_valid_perfume_has_plain_name_no_asterisks(self):
+        """Card should contain the display name as plain text — no
+        asterisks. WhatsApp itself renders *word* as bold, but Chat Mitra's
+        send API rejects the literal "*" character outright ("Text contains
+        invalid characters"), confirmed via direct API tests: a lone "*"
+        alone was enough to trigger it, nothing to do with pairing/emoji."""
         pid = next(iter(PERFUMES))
         card = build_price_card(pid)
         display_name = PERFUMES[pid]["display_name"]
-        assert f"*{display_name}*" in card
+        assert display_name in card
+        assert "*" not in card
 
     def test_valid_perfume_has_shipping(self):
         """Shipping card should be appended to every price card."""
@@ -66,11 +72,15 @@ class TestBuildPriceCard:
         card = build_price_card(pid)
         assert isinstance(card, str)
 
-    def test_card_has_emoji_header(self):
-        """Card should start with the 🌸 emoji."""
+    def test_card_starts_with_plain_name_no_emoji_or_asterisks(self):
+        """No leading emoji (🌸 was suspected before "*" was isolated as the
+        actual cause) and no asterisks anywhere (the confirmed cause)."""
         pid = next(iter(PERFUMES))
         card = build_price_card(pid)
-        assert card.startswith("🌸")
+        display_name = PERFUMES[pid]["display_name"]
+        assert card.startswith(display_name)
+        for risky_char in ("🌸", "🚚", "|", "*"):
+            assert risky_char not in card
 
     def test_size_labels_present(self):
         """Card should contain size tier labels."""
@@ -81,12 +91,24 @@ class TestBuildPriceCard:
             if size in prices:
                 assert size in card
 
+    def test_ends_with_will_contact_line(self):
+        """Every price reply should close with the 'we'll contact you' line,
+        after the shipping card."""
+        pid = next(iter(PERFUMES))
+        card = build_price_card(pid)
+        assert card.endswith(WILL_CONTACT_LINE)
+        assert card.index(SHIPPING_CARD) < card.index(WILL_CONTACT_LINE)
+
 
 class TestFixedMessages:
     """Test fixed reply messages."""
 
     def test_fallback_message(self):
         assert "perfume" in FALLBACK_MESSAGE.lower() or "🙂" in FALLBACK_MESSAGE
+
+    def test_fallback_message_includes_catalog_link_and_prompt(self):
+        assert CATALOG_SHEET_URL in FALLBACK_MESSAGE
+        assert "quantity" in FALLBACK_MESSAGE.lower()
 
     def test_ambiguous_message(self):
         assert "more than one" in AMBIGUOUS_MESSAGE.lower()

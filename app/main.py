@@ -170,6 +170,37 @@ def _extract_message_data(payload: dict) -> dict | None:
     }
 
 
+def _log_inbound(message_id: str, sender: str, message_type: str, message_text: str) -> None:
+    """
+    Full, untruncated inbound log for real-time debugging. Safe to log in
+    full — inbound text is naturally bounded by MAX_MESSAGE_LENGTH before it
+    ever gets this far in most paths, and even the order-confirmation
+    template (which bypasses that cutoff) is short enough to log whole.
+    """
+    logger.info(
+        ">>> INBOUND  id=%s  from=%s  type=%s\n"
+        "----- MESSAGE TEXT START -----\n%s\n----- MESSAGE TEXT END -----",
+        message_id,
+        sender,
+        message_type or "(unknown)",
+        message_text if message_text else "(empty)",
+    )
+
+
+def _log_outbound(sender: str, reply_text: str, success: bool, **context) -> None:
+    """Full outbound reply log — the exact text sent, plus any match context
+    the caller has (layer, confidence, matched perfume, etc.)."""
+    extra = "  ".join(f"{k}={v}" for k, v in context.items())
+    logger.info(
+        "<<< OUTBOUND  to=%s  sent=%s%s\n"
+        "----- REPLY TEXT START -----\n%s\n----- REPLY TEXT END -----",
+        sender,
+        success,
+        f"  {extra}" if extra else "",
+        reply_text,
+    )
+
+
 @app.post("/webhook")
 async def webhook_handler(request: Request):
     """
@@ -213,13 +244,7 @@ async def webhook_handler(request: Request):
     message_type = msg_data["message_type"]
     message_text = msg_data["message_text"]
 
-    logger.info(
-        "Inbound message: id=%s, from=%s, type=%s, text=%s",
-        message_id,
-        sender,
-        message_type,
-        message_text[:100] if message_text else "(empty)",
-    )
+    _log_inbound(message_id, sender, message_type, message_text)
 
     # Step 3: Dedup check — moved ahead of every reply-sending branch below
     # (previously only guarded the matching pipeline, so a retried webhook
@@ -230,8 +255,8 @@ async def webhook_handler(request: Request):
 
     # Step 4a: Non-text message types
     if message_type and message_type != "text":
-        logger.info("Non-text message type '%s' from %s — sending prompt", message_type, sender)
-        await send_reply(sender, NON_TEXT_MESSAGE)
+        success = await send_reply(sender, NON_TEXT_MESSAGE)
+        _log_outbound(sender, NON_TEXT_MESSAGE, success, reason="non_text_message_type")
         return Response(status_code=200, content="OK")
 
     # Step 4b: Empty or missing message text
@@ -248,6 +273,7 @@ async def webhook_handler(request: Request):
     # order acknowledgment).
     if is_order_confirmation(message_text):
         success = await send_reply(sender, ORDER_CONFIRMATION_MESSAGE)
+        _log_outbound(sender, ORDER_CONFIRMATION_MESSAGE, success, reason="order_confirmation")
         await log_message_event(
             message_id=message_id,
             sender=sender,
@@ -258,13 +284,12 @@ async def webhook_handler(request: Request):
             ambiguous=False,
             reply_sent=success,
         )
-        logger.info("Order confirmation from %s — sent acknowledgment (sent=%s)", sender, success)
         return Response(status_code=200, content="OK")
 
     # Step 6: Message too long
     if len(message_text) > settings.MAX_MESSAGE_LENGTH:
-        logger.info("Message too long (%d chars) from %s", len(message_text), sender)
-        await send_reply(sender, FALLBACK_MESSAGE)
+        success = await send_reply(sender, FALLBACK_MESSAGE)
+        _log_outbound(sender, FALLBACK_MESSAGE, success, reason=f"too_long_{len(message_text)}_chars")
         return Response(status_code=200, content="OK")
 
     # Step 7: Run matching pipeline
@@ -280,6 +305,15 @@ async def webhook_handler(request: Request):
 
     # Step 9: Send reply
     success = await send_reply(sender, reply_text)
+    _log_outbound(
+        sender,
+        reply_text,
+        success,
+        matched=result.perfume_id or "(none)",
+        layer=result.layer or "(none)",
+        confidence=result.confidence,
+        ambiguous=result.ambiguous,
+    )
 
     # Step 10: Log the event for the analytics dashboard (best-effort, never
     # blocks or fails the customer-facing reply — see app/analytics.py).
@@ -292,15 +326,6 @@ async def webhook_handler(request: Request):
         confidence=result.confidence,
         ambiguous=result.ambiguous,
         reply_sent=success,
-    )
-
-    logger.info(
-        "Reply sent: to=%s, matched=%s, layer=%s, confidence=%s, sent=%s",
-        sender,
-        result.perfume_id or "(none)",
-        result.layer or "(none)",
-        result.confidence,
-        success,
     )
 
     return Response(status_code=200, content="OK")

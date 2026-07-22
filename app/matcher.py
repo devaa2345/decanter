@@ -146,6 +146,22 @@ def _layer1_exact_match(normalized: str) -> MatchResult:
 
 
 
+def _build_ngram_candidates(normalized: str) -> list[str]:
+    """
+    Words plus 2-word and 3-word sliding windows from the message — shared
+    phrase-extraction logic used by both fuzzy matching (Layer 2) and LLM
+    candidate shortlisting (Layer 3).
+    """
+    words = normalized.split()
+    candidates: list[str] = list(words)
+
+    for n in (2, 3):
+        for i in range(len(words) - n + 1):
+            candidates.append(" ".join(words[i : i + n]))
+
+    return candidates
+
+
 def _layer2_fuzzy_match(normalized: str) -> MatchResult:
     """
     Layer 2: Fuzzy string matching against known keywords.
@@ -154,15 +170,7 @@ def _layer2_fuzzy_match(normalized: str) -> MatchResult:
     the message, compares each against all keywords using partial_ratio.
     """
     threshold = settings.FUZZY_THRESHOLD
-
-    # Build candidate phrases from the message
-    words = normalized.split()
-    candidates: list[str] = list(words)
-
-    # Add 2-word and 3-word sliding windows
-    for n in (2, 3):
-        for i in range(len(words) - n + 1):
-            candidates.append(" ".join(words[i : i + n]))
+    candidates = _build_ngram_candidates(normalized)
 
     best_score = 0.0
     best_pid: str | None = None
@@ -215,18 +223,60 @@ def _layer2_fuzzy_match(normalized: str) -> MatchResult:
     )
 
 
+def _top_candidates_for_llm(normalized: str, limit: int = 25) -> dict[str, dict]:
+    """
+    Build a small shortlist of the most plausible perfumes for Layer 3 to
+    choose from, instead of handing the LLM the entire catalog.
+
+    With 1200+ perfumes, listing all of them in the prompt runs to ~23K
+    tokens — confirmed in production to blow straight through Groq's
+    per-minute token limit (6000 TPM on the current tier), failing Layer 3
+    on every single call, not just occasionally. Reuses the same word/n-gram
+    fuzzy scoring as Layer 2, but ranks by each perfume's BEST keyword score
+    rather than picking one overall winner, so a reasonably wide (but still
+    small and cheap) net gets cast for the LLM to reason over.
+    """
+    candidates = _build_ngram_candidates(normalized)
+
+    best_score_per_pid: dict[str, float] = {}
+    for pid, data in PERFUMES.items():
+        for keyword in data["keywords"]:
+            if len(keyword) < 4:
+                continue
+            if " " not in keyword and keyword in GENERIC_STOPWORDS:
+                continue
+            for candidate in candidates:
+                if len(candidate) < 4:
+                    continue
+                if " " not in candidate and candidate in GENERIC_STOPWORDS:
+                    continue
+                score = fuzz.ratio(candidate, keyword)
+                if score > best_score_per_pid.get(pid, -1.0):
+                    best_score_per_pid[pid] = score
+
+    ranked = sorted(best_score_per_pid.items(), key=lambda kv: kv[1], reverse=True)
+    top_pids = [pid for pid, _ in ranked[:limit]]
+    return {pid: PERFUMES[pid] for pid in top_pids}
+
+
 async def _layer3_llm_match(normalized: str) -> MatchResult:
     """
     Layer 3: Groq LLM classification (only called when Layers 1 & 2 fail).
 
-    Asks the LLM to identify which perfume_id the message refers to.
-    Returns only a known ID or None — never generates prices or reply text.
+    Asks the LLM to identify which perfume_id the message refers to, choosing
+    only from a pre-narrowed shortlist (see _top_candidates_for_llm) — never
+    the full catalog. Returns only a known ID or None — never generates
+    prices or reply text.
     """
     from app.groq_client import classify_perfume
 
+    candidates = _top_candidates_for_llm(normalized)
+    if not candidates:
+        return MatchResult()
+
     try:
-        result = await classify_perfume(normalized)
-        if result and result in PERFUMES:
+        result = await classify_perfume(normalized, candidates=candidates)
+        if result and result in candidates:
             return MatchResult(
                 perfume_id=result,
                 layer="llm",

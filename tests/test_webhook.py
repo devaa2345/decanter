@@ -5,11 +5,14 @@ Uses FastAPI TestClient to simulate Chat Mitra webhook payloads.
 Mocks the Chat Mitra send-message call to avoid real API calls.
 """
 
+import hashlib
+import hmac
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
+from app import main
 from app.dedup import dedup_cache
 from app.main import app
 
@@ -20,6 +23,22 @@ def clear_dedup():
     dedup_cache.clear()
     yield
     dedup_cache.clear()
+
+
+@pytest.fixture(autouse=True)
+def no_webhook_secret():
+    """
+    Blank CHATMITRA_WEBHOOK_SECRET for every test in this file except the
+    ones in TestWebhookSignatureVerification (which explicitly re-patch it).
+
+    Without this, these tests silently depend on whatever's in the local
+    .env — they were written to exercise payload parsing/matching/dedup,
+    not signature verification, but once a real webhook secret got
+    configured for actual Chat Mitra use, every one of them started
+    failing with 403 instead of what they were actually testing.
+    """
+    with patch.object(main.settings, "CHATMITRA_WEBHOOK_SECRET", ""):
+        yield
 
 
 @pytest.fixture
@@ -51,6 +70,71 @@ def _make_webhook_payload(
         "timestamp": int(time.time()),
         "message": message,
     }
+
+
+class TestWebhookSignatureVerification:
+    """
+    Chat Mitra signs the raw body with HMAC-SHA256 and sends the hex digest
+    in X-Webhook-Signature (see app.main._verify_webhook_signature). No
+    coverage existed for this before — every other test in this file runs
+    with the secret blanked (see the no_webhook_secret fixture above), which
+    is correct for what THEY'RE testing, but left the actual verification
+    logic itself unexercised.
+    """
+
+    SECRET = "test_webhook_secret_abc123"
+
+    def _signed_headers(self, body: bytes) -> dict:
+        signature = hmac.new(self.SECRET.encode("utf-8"), body, hashlib.sha256).hexdigest()
+        return {"x-webhook-signature": signature, "content-type": "application/json"}
+
+    @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
+    def test_valid_signature_is_accepted(self, mock_send, client):
+        payload = _make_webhook_payload("sauvage")
+        import json
+
+        body = json.dumps(payload).encode("utf-8")
+        with patch.object(main.settings, "CHATMITRA_WEBHOOK_SECRET", self.SECRET):
+            response = client.post("/webhook", content=body, headers=self._signed_headers(body))
+        assert response.status_code == 200
+        mock_send.assert_called_once()
+
+    def test_missing_signature_header_is_rejected(self, client):
+        payload = _make_webhook_payload("sauvage")
+        with patch.object(main.settings, "CHATMITRA_WEBHOOK_SECRET", self.SECRET):
+            response = client.post("/webhook", json=payload)
+        assert response.status_code == 403
+
+    def test_wrong_signature_is_rejected(self, client):
+        payload = _make_webhook_payload("sauvage")
+        with patch.object(main.settings, "CHATMITRA_WEBHOOK_SECRET", self.SECRET):
+            response = client.post(
+                "/webhook", json=payload, headers={"x-webhook-signature": "0" * 64}
+            )
+        assert response.status_code == 403
+
+    def test_signature_computed_for_a_different_secret_is_rejected(self, client):
+        payload = _make_webhook_payload("sauvage")
+        import json
+
+        body = json.dumps(payload).encode("utf-8")
+        wrong_secret_sig = hmac.new(b"not-the-real-secret", body, hashlib.sha256).hexdigest()
+        with patch.object(main.settings, "CHATMITRA_WEBHOOK_SECRET", self.SECRET):
+            response = client.post(
+                "/webhook",
+                content=body,
+                headers={"x-webhook-signature": wrong_secret_sig, "content-type": "application/json"},
+            )
+        assert response.status_code == 403
+
+    @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
+    def test_no_secret_configured_skips_verification(self, mock_send, client):
+        """Already covered implicitly by every other test via the
+        no_webhook_secret fixture, but spelled out explicitly here."""
+        payload = _make_webhook_payload("sauvage")
+        with patch.object(main.settings, "CHATMITRA_WEBHOOK_SECRET", ""):
+            response = client.post("/webhook", json=payload)
+        assert response.status_code == 200
 
 
 class TestHealthCheck:

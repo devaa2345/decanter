@@ -1,31 +1,40 @@
 """
 Groq LLM classification client.
 
-Uses the OpenAI-compatible SDK pointed at Groq's API to classify
-which perfume a customer message refers to. Returns ONLY a perfume_id
-from the known catalog, or None. Never generates prices or reply text.
+Uses the OpenAI-compatible SDK pointed at Groq's API to classify which
+perfume a customer message refers to, choosing only from a caller-supplied
+shortlist of candidates — never the full catalog (see
+app.matcher._top_candidates_for_llm). Returns ONLY a perfume_id from that
+shortlist, or None. Never generates prices or reply text.
 """
 
 import logging
 
 from openai import AsyncOpenAI
 
-from app.catalog import PERFUMES
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Build the system prompt once at import time
-_PERFUME_LIST = "\n".join(
-    f"- {pid}: {data['display_name']}"
-    for pid, data in PERFUMES.items()
-)
 
-_SYSTEM_PROMPT = f"""You are a perfume identification assistant for a decant business.
+def _build_system_prompt(candidates: dict[str, dict]) -> str:
+    """
+    Build the classification prompt scoped to a shortlist of candidate
+    perfumes. With 1200+ perfumes, listing the entire catalog runs to
+    ~23K tokens — confirmed in production to blow straight through Groq's
+    per-minute token limit (6000 TPM), failing every single call. Every
+    caller must pass a pre-narrowed shortlist; there is no "full catalog"
+    fallback here on purpose, so that bug can't quietly come back.
+    """
+    perfume_list = "\n".join(
+        f"- {pid}: {data['display_name']}" for pid, data in candidates.items()
+    )
+
+    return f"""You are a perfume identification assistant for a decant business.
 Your ONLY job is to identify which perfume the customer is asking about.
 
-Here is the complete list of perfume IDs and their display names:
-{_PERFUME_LIST}
+Here is the list of perfume IDs and their display names to choose from:
+{perfume_list}
 
 RULES:
 1. Return ONLY the perfume_id (e.g. "afnan9pm_rebel") that best matches what the customer is asking about.
@@ -36,15 +45,19 @@ RULES:
 """
 
 
-async def classify_perfume(message: str) -> str | None:
+async def classify_perfume(message: str, candidates: dict[str, dict]) -> str | None:
     """
-    Ask the LLM to classify which perfume the message refers to.
+    Ask the LLM to classify which perfume the message refers to, choosing
+    only from the given candidate shortlist.
 
     Returns a perfume_id string if confidently matched, or None.
     Never raises — all exceptions are caught and logged.
     """
     if not settings.GROQ_API_KEY:
         logger.warning("GROQ_API_KEY not set — skipping LLM classification")
+        return None
+
+    if not candidates:
         return None
 
     try:
@@ -58,7 +71,7 @@ async def classify_perfume(message: str) -> str | None:
             temperature=0,
             max_tokens=100,
             messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "system", "content": _build_system_prompt(candidates)},
                 {"role": "user", "content": message},
             ],
         )
@@ -69,8 +82,8 @@ async def classify_perfume(message: str) -> str | None:
 
         logger.info("Groq LLM response: %s", result)
 
-        # Validate: must be a known perfume_id or "none"
-        if result and result != "none" and result in PERFUMES:
+        # Validate: must be one of the offered candidates or "none"
+        if result and result != "none" and result in candidates:
             return result
 
         return None
