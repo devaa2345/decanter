@@ -2,15 +2,19 @@
 Unit tests for the matching pipeline.
 
 Covers:
-- Exact keyword/substring matching (Layer 1)
-- Fuzzy matching with typos (Layer 2)
+- Exact keyword/substring matching (fallback, was "Layer 1")
+- Fuzzy matching with typos (fallback, was "Layer 2")
 - Ambiguous multi-perfume messages
 - Unrelated/empty messages
 - Case insensitivity
-- Layer 3 candidate shortlisting (see TestTopCandidatesForLLM below —
+- Primary-LLM candidate shortlisting (see TestTopCandidatesForLLM below —
   this is the regression guard for a real production bug: the old code
   handed Groq the entire 1200+ catalog on every call, running to ~23.5K
   tokens against a 6000 TPM limit and failing every single time)
+- Groq-first pipeline ordering with fallback to the free matchers (see
+  TestMatchPerfumeGroqFirstWithFallback) — Groq is now tried FIRST for
+  every message, not as a last resort, but the bot must never go fully
+  silent on a Groq outage/rate-limit/low-confidence response.
 """
 
 import asyncio
@@ -19,14 +23,16 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.catalog import PERFUMES
+from app.groq_client import GroqClassification
 from app.matcher import (
     MatchResult,
     _build_ngram_candidates,
     _keyword_boundary_regex,
     _layer1_exact_match,
     _layer2_fuzzy_match,
-    _layer3_llm_match,
+    _primary_llm_match,
     _top_candidates_for_llm,
+    match_perfume,
     normalize_message,
 )
 
@@ -383,51 +389,155 @@ class TestTopCandidatesForLLM:
             assert PERFUMES[pid] is data
 
 
-class TestLayer3LLMMatch:
+class TestPrimaryLLMMatch:
+    """
+    _primary_llm_match is the Groq-first primary path (promoted from a
+    last-resort "Layer 3" to running first on every message — see
+    TestMatchPerfumeGroqFirstWithFallback for the full pipeline ordering).
+    """
+
     def test_empty_shortlist_skips_the_llm_call_entirely(self):
         """No point calling Groq (or even building a prompt) if there's
         nothing plausible to offer it."""
-        with patch("app.groq_client.classify_perfume", new_callable=AsyncMock) as mock_classify:
-            result = asyncio.run(_layer3_llm_match("hi"))
+        with patch("app.groq_client.classify_and_phrase", new_callable=AsyncMock) as mock_classify:
+            result = asyncio.run(_primary_llm_match("hi"))
         mock_classify.assert_not_called()
         assert result.perfume_id is None
 
-    def test_calls_classify_perfume_with_a_bounded_candidates_dict(self):
-        """End-to-end wiring check: Layer 3 must pass a shortlist, not the
-        full PERFUMES dict, to the Groq client."""
+    def test_calls_classify_and_phrase_with_a_bounded_candidates_dict(self):
+        """End-to-end wiring check: the primary path must pass a shortlist,
+        not the full PERFUMES dict, to the Groq client."""
         with patch(
-            "app.groq_client.classify_perfume", new_callable=AsyncMock, return_value=None
+            "app.groq_client.classify_and_phrase",
+            new_callable=AsyncMock,
+            return_value=GroqClassification(),
         ) as mock_classify:
-            asyncio.run(_layer3_llm_match("suvage 10ml"))
+            asyncio.run(_primary_llm_match("suvage 10ml"))
 
         mock_classify.assert_called_once()
         _, kwargs = mock_classify.call_args
         assert len(kwargs["candidates"]) <= 25
         assert len(kwargs["candidates"]) < len(PERFUMES)
 
-    def test_matched_result_shape(self):
+    def test_matched_result_carries_opening_and_closing(self):
         # Returns whatever candidate it was actually offered, rather than a
-        # hardcoded pid — classify_perfume can only ever return something
+        # hardcoded pid — classify_and_phrase can only ever return something
         # from the shortlist it's given, so a fixed unrelated pid would
-        # (correctly) get rejected by the `result in candidates` check.
+        # (correctly) get rejected by the "pid in candidates" check.
         async def fake_classify(message, candidates):
-            return next(iter(candidates))
+            return GroqClassification(
+                perfume_id=next(iter(candidates)), opening="Hi!", closing="Cool?"
+            )
 
         with patch(
-            "app.groq_client.classify_perfume",
+            "app.groq_client.classify_and_phrase",
             new_callable=AsyncMock,
             side_effect=fake_classify,
         ):
-            result = asyncio.run(_layer3_llm_match("suvage 10ml"))
+            result = asyncio.run(_primary_llm_match("suvage 10ml"))
         assert result.perfume_id is not None
         assert result.layer == "llm"
         assert result.confidence == 80.0
+        assert result.opening == "Hi!"
+        assert result.closing == "Cool?"
+
+    def test_empty_classification_returns_empty_result(self):
+        with patch(
+            "app.groq_client.classify_and_phrase",
+            new_callable=AsyncMock,
+            return_value=GroqClassification(),
+        ):
+            result = asyncio.run(_primary_llm_match("suvage 10ml"))
+        assert result.perfume_id is None
+
+    def test_id_outside_offered_candidates_is_rejected(self):
+        """Defense in depth even though app.groq_client already validates
+        this — a pid outside what was offered must never be trusted."""
+        async def fake_classify(message, candidates):
+            return GroqClassification(
+                perfume_id="totally_not_offered_xyz", opening="Hi", closing="Ok"
+            )
+
+        with patch(
+            "app.groq_client.classify_and_phrase",
+            new_callable=AsyncMock,
+            side_effect=fake_classify,
+        ):
+            result = asyncio.run(_primary_llm_match("suvage 10ml"))
+        assert result.perfume_id is None
 
     def test_exception_returns_empty_result_not_raised(self):
         with patch(
-            "app.groq_client.classify_perfume",
+            "app.groq_client.classify_and_phrase",
             new_callable=AsyncMock,
             side_effect=RuntimeError("groq down"),
         ):
-            result = asyncio.run(_layer3_llm_match("suvage 10ml"))
+            result = asyncio.run(_primary_llm_match("suvage 10ml"))
         assert result.perfume_id is None
+
+
+class TestMatchPerfumeGroqFirstWithFallback:
+    """
+    The core behavior change: Groq runs FIRST for every message now, not
+    as a last resort. The free exact/fuzzy matchers only run when Groq
+    isn't confident (or errors/times out) — so the bot never goes fully
+    silent on a Groq outage or rate limit (this has actually happened once
+    already this session, via a token-limit error).
+    """
+
+    def test_confident_groq_match_is_used_directly(self):
+        async def fake_classify(message, candidates):
+            return GroqClassification(
+                perfume_id=next(iter(candidates)), opening="Hi!", closing="Cool?"
+            )
+
+        with patch(
+            "app.groq_client.classify_and_phrase",
+            new_callable=AsyncMock,
+            side_effect=fake_classify,
+        ):
+            result = asyncio.run(match_perfume("suvage 10ml"))
+        assert result.layer == "llm"
+        assert result.opening == "Hi!"
+
+    def test_groq_failure_falls_through_to_exact_match(self):
+        """A message that resolves fine via exact match must still work
+        even when Groq is completely down."""
+        with patch(
+            "app.groq_client.classify_and_phrase",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("groq is down"),
+        ):
+            result = asyncio.run(match_perfume("sauvage"))
+        assert result.perfume_id is not None
+        assert result.layer == "exact"
+
+    def test_groq_no_confident_match_falls_through_to_exact_match(self):
+        with patch(
+            "app.groq_client.classify_and_phrase",
+            new_callable=AsyncMock,
+            return_value=GroqClassification(),
+        ):
+            result = asyncio.run(match_perfume("sauvage"))
+        assert result.perfume_id is not None
+        assert result.layer == "exact"
+
+    def test_groq_and_exact_both_miss_falls_through_to_fuzzy(self):
+        with patch(
+            "app.groq_client.classify_and_phrase",
+            new_callable=AsyncMock,
+            return_value=GroqClassification(),
+        ):
+            result = asyncio.run(match_perfume("savage price please"))  # typo, misses exact
+        assert result.perfume_id is not None
+        assert result.layer == "fuzzy"
+
+    def test_everything_missing_returns_empty_result(self):
+        with patch(
+            "app.groq_client.classify_and_phrase",
+            new_callable=AsyncMock,
+            return_value=GroqClassification(),
+        ):
+            result = asyncio.run(match_perfume("completely unrelated gibberish qzxjklw"))
+        assert result.perfume_id is None
+        assert result.ambiguous is False

@@ -1,11 +1,18 @@
 """
-3-layer perfume matching pipeline.
+Perfume matching pipeline — Groq LLM first, deterministic fallback.
 
-Layer 1: Normalize + exact/substring keyword match (free, instant)
-Layer 2: Fuzzy string match via rapidfuzz (free, fast)
-Layer 3: Groq LLM classification (paid, slow — last resort)
+Primary: Groq LLM classification + reply phrasing (llama-3.1-8b-instant —
+paid, but fast; ~few hundred ms typical). Tried first for every message.
+Fallback (only on Groq error/timeout/no-confident-match/ambiguous), same
+order as before this became LLM-first:
+  1. Normalize + exact/substring keyword match (free, instant)
+  2. Fuzzy string match via rapidfuzz (free, fast)
+This means the bot never goes fully silent on a Groq outage or rate limit.
 
-All prices come from catalog.py, NEVER from the LLM.
+All prices come from catalog.py, NEVER from the LLM — Groq only picks
+*which* perfume and writes short opening/closing phrasing around the price
+card; the numbers themselves are always assembled deterministically (see
+app.formatter.build_price_card).
 """
 
 import functools
@@ -34,6 +41,12 @@ class MatchResult:
     # so the reply can list them instead of just asking "which one?" with
     # no information to go on.
     matched_perfume_ids: list[str] | None = None
+    # Populated only by the primary Groq match (layer="llm") — short,
+    # natural phrasing to wrap around the deterministic price card. Never
+    # contains prices/numbers itself (enforced by the system prompt in
+    # app.groq_client) — those always come from catalog.py.
+    opening: str | None = None
+    closing: str | None = None
 
 
 # Common English words that appear as catalog keywords but are too
@@ -313,38 +326,45 @@ def _top_candidates_for_llm(normalized: str, limit: int = 25) -> dict[str, dict]
     return {pid: PERFUMES[pid] for pid in top_pids}
 
 
-async def _layer3_llm_match(normalized: str) -> MatchResult:
+async def _primary_llm_match(normalized: str) -> MatchResult:
     """
-    Layer 3: Groq LLM classification (only called when Layers 1 & 2 fail).
+    Primary match: Groq LLM classification + reply phrasing, tried FIRST for
+    every message (not a last resort — see match_perfume below).
 
     Asks the LLM to identify which perfume_id the message refers to, choosing
     only from a pre-narrowed shortlist (see _top_candidates_for_llm) — never
-    the full catalog. Returns only a known ID or None — never generates
-    prices or reply text.
+    the full catalog, which is what keeps every call safely under Groq's
+    per-minute token limit. Never generates prices — see app.groq_client and
+    app.formatter for how opening/closing phrasing stays separate from the
+    deterministic price grid.
     """
-    from app.groq_client import classify_perfume
+    from app.groq_client import classify_and_phrase
 
     candidates = _top_candidates_for_llm(normalized)
     if not candidates:
         return MatchResult()
 
     try:
-        result = await classify_perfume(normalized, candidates=candidates)
-        if result and result in candidates:
+        result = await classify_and_phrase(normalized, candidates=candidates)
+        if result.perfume_id and result.perfume_id in candidates:
             return MatchResult(
-                perfume_id=result,
+                perfume_id=result.perfume_id,
                 layer="llm",
                 confidence=80.0,
+                opening=result.opening,
+                closing=result.closing,
             )
     except Exception:
-        logger.exception("Layer 3 LLM classification failed")
+        logger.exception("Primary LLM classification failed")
 
     return MatchResult()
 
 
 async def match_perfume(message_text: str) -> MatchResult:
     """
-    Run the full 3-layer matching pipeline.
+    Run the matching pipeline: Groq LLM first (primary), falling through to
+    the free exact/fuzzy matchers only if Groq errors, times out, or isn't
+    confident — so the bot never goes silent on a Groq outage or rate limit.
 
     Returns a MatchResult indicating the match (or lack thereof).
     """
@@ -353,22 +373,28 @@ async def match_perfume(message_text: str) -> MatchResult:
     if not normalized:
         return MatchResult()
 
-    # Layer 1: Exact/substring match
+    # Primary: Groq LLM classification + phrasing (async)
+    result = await _primary_llm_match(normalized)
+    if result.perfume_id:
+        logger.info("Primary LLM match: pid=%s", result.perfume_id)
+        return result
+
+    # Fallback: exact/substring match
     result = _layer1_exact_match(normalized)
     if result.perfume_id or result.ambiguous:
         logger.info(
-            "Layer 1 match: pid=%s, keyword=%s, ambiguous=%s",
+            "Fallback exact match: pid=%s, keyword=%s, ambiguous=%s",
             result.perfume_id,
             result.matched_keyword,
             result.ambiguous,
         )
         return result
 
-    # Layer 2: Fuzzy match
+    # Fallback: fuzzy match
     result = _layer2_fuzzy_match(normalized)
     if result.perfume_id or result.ambiguous:
         logger.info(
-            "Layer 2 fuzzy match: pid=%s, keyword=%s, score=%.1f, ambiguous=%s",
+            "Fallback fuzzy match: pid=%s, keyword=%s, score=%.1f, ambiguous=%s",
             result.perfume_id,
             result.matched_keyword,
             result.confidence or 0,
@@ -376,12 +402,6 @@ async def match_perfume(message_text: str) -> MatchResult:
         )
         return result
 
-    # Layer 3: LLM classification (async)
-    result = await _layer3_llm_match(normalized)
-    if result.perfume_id:
-        logger.info("Layer 3 LLM match: pid=%s", result.perfume_id)
-        return result
-
-    # No match found across all layers
+    # No match found across all methods
     logger.info("No match found for message: %s", message_text[:100])
     return MatchResult()

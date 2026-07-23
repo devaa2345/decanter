@@ -93,12 +93,24 @@ def build_ambiguous_card(perfume_ids: list[str] | None) -> str:
     return "\n".join(lines)
 
 
-def build_price_card(perfume_id: str) -> str:
+def build_price_card(
+    perfume_id: str,
+    opening: str | None = None,
+    closing: str | None = None,
+) -> str:
     """
     Build the full reply message for a matched perfume.
 
     Returns the price card + shipping card as a single string.
     Always shows all available size tiers (never just one size).
+
+    opening/closing (from Groq's classify_and_phrase — see app.matcher)
+    wrap the card with short, natural, personalized phrasing when
+    available. The name header, price grid, and shipping card underneath
+    are always the exact same deterministic text either way — Groq never
+    touches a price, only what surrounds it. Without them (Groq
+    unavailable, or the free fallback matcher resolved it instead), this
+    renders with the same plain header/closing it always has.
     """
     perfume = PERFUMES.get(perfume_id)
     if not perfume:
@@ -114,7 +126,12 @@ def build_price_card(perfume_id: str) -> str:
     # name + a plain "-" divider (confirmed safe) fakes emphasis without
     # any markdown Chat Mitra might reject.
     divider = "-" * min(max(len(display_name), 12), 32)
-    lines = [display_name.upper(), divider]
+    lines = []
+    if opening:
+        lines.append(opening)
+        lines.append("")
+    lines.append(display_name.upper())
+    lines.append(divider)
 
     # Define the standard decant tiers and full bottle tier
     decant_sizes = ["3ml", "5ml", "8ml", "10ml", "20ml", "30ml"]
@@ -154,10 +171,11 @@ def build_price_card(perfume_id: str) -> str:
             else:
                 lines.append(f"Full bottle  {_format_price(prices[size_key])}")
 
-    # Closing divider + shipping card + contact-you line
+    # Closing divider + shipping card + contact-you line (Groq's closing
+    # phrasing if we have it, else the plain deterministic default)
     lines.append(divider)
     lines.append(SHIPPING_CARD)
     lines.append("")
-    lines.append(WILL_CONTACT_LINE)
+    lines.append(closing or WILL_CONTACT_LINE)
 
     return "\n".join(lines)

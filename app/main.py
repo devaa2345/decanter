@@ -306,7 +306,7 @@ async def webhook_handler(request: Request):
     if result.ambiguous:
         reply_text = build_ambiguous_card(result.matched_perfume_ids)
     elif result.perfume_id:
-        reply_text = build_price_card(result.perfume_id)
+        reply_text = build_price_card(result.perfume_id, result.opening, result.closing)
     elif is_greeting_or_catalog_request(message_text):
         reply_text = FALLBACK_MESSAGE
     else:
