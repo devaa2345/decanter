@@ -259,6 +259,22 @@ _REQUEST_CUES: tuple[str, ...] = (
     "information", "details", "detail", "quote", "catalog", "catalogue",
 )
 
+# A cue word doesn't mean much if it's negated — confirmed in production:
+# "the 9pm rebel is really good but I don't want ut" matched the "want" cue
+# and fired a price card despite the customer explicitly declining it. Real
+# Groq already handles this correctly on its own (it saw the full sentence
+# and returned explicit_ask=false for this exact message) — this is only
+# needed by the deterministic fallback below, which has no such contextual
+# understanding. normalize_message strips apostrophes to spaces, so "don't"
+# becomes the two tokens "don"+"t" — "don"/"won"/"doesn"/"didn" cover the
+# contracted forms, "dont"/"wont"/etc. cover the ones typed without one.
+# Deliberately excludes "can"/"cant": "can" alone is a common genuine-ask
+# word ("can I get sauvage"), too ambiguous with "can't" to include here.
+_NEGATION_MARKERS: tuple[str, ...] = (
+    "dont", "don", "doesnt", "doesn", "didnt", "didn",
+    "wont", "won", "not", "never", "no", "nahi",
+)
+
 # A message this short that still contains a real keyword match is almost
 # always the customer directly naming what they want ("sauvage", "bleu de
 # chanel 10ml") rather than a passing mention buried inside a longer,
@@ -271,8 +287,15 @@ def _looks_like_explicit_request(normalized: str) -> bool:
     Deterministic stand-in for Groq's explicit_ask judgment (see module
     docstring), used only by the exact/fuzzy fallback layers inside
     match_perfume.
+
+    Negation is checked first, ahead of even the short-message shortcut: a
+    short message like "sauvage nahi chahiye" ("don't want sauvage") is
+    just as much a decline as a longer one, and erring toward silence is
+    the safer failure mode for this coarse, Groq-unavailable-only fallback.
     """
     if not normalized:
+        return False
+    if any(_keyword_boundary_regex(marker).search(normalized) for marker in _NEGATION_MARKERS):
         return False
     words = normalized.split()
     if len(words) <= _SHORT_MESSAGE_WORD_LIMIT:

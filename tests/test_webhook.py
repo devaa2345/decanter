@@ -326,6 +326,28 @@ class TestWebhookHandler:
         mock_send.assert_not_called()
 
     @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
+    def test_declining_a_perfume_by_name_stays_silent(self, mock_send, client):
+        """The exact real production bug reported live: 'The 9pm rebel is
+        really good but I don't want ut' still got a price card — Groq
+        itself already returns explicit_ask=false for this (it understands
+        the negation), but the deterministic fallback's keyword-plus-cue
+        heuristic matched "rebel" and then mis-fired on "want" inside
+        "don't want" with no negation awareness. classify_and_phrase is
+        mocked empty here (standing in for Groq being unavailable) to
+        exercise the fallback's own negation guard end to end."""
+        with patch(
+            "app.groq_client.classify_and_phrase",
+            new_callable=AsyncMock,
+            return_value=GroqClassification(),
+        ):
+            payload = _make_webhook_payload(
+                "the 9 pm rebel is really good but i don't want ut"
+            )
+            response = client.post("/webhook", json=payload)
+        assert response.status_code == 200
+        mock_send.assert_not_called()
+
+    @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
     def test_ambiguous_9pm_lists_all_real_candidates(self, mock_send, client):
         """A bare '9pm' must get a full price card for every real candidate
         (name + prices), not the old content-free 'which one?' message.

@@ -768,6 +768,49 @@ class TestLooksLikeExplicitRequest:
     def test_empty_message_is_not_explicit(self):
         assert _looks_like_explicit_request("") is False
 
+    def test_negated_cue_word_is_not_explicit(self):
+        """The exact reported production bug: 'the 9pm rebel is really
+        good but I don't want ut' matched the 'want' cue and fired a price
+        card despite the customer explicitly declining it. Real Groq
+        already gets this right on its own (see app.groq_client); this is
+        the same fix for the deterministic fallback."""
+        assert (
+            _looks_like_explicit_request(
+                normalize_message("the 9 pm rebel is really good but i dont want ut")
+            )
+            is False
+        )
+
+    def test_negated_cue_word_with_apostrophe_contraction_is_not_explicit(self):
+        """normalize_message strips the apostrophe in "don't" to "don t" —
+        confirm the negation check still catches the contracted form, not
+        just the no-apostrophe spelling."""
+        assert (
+            _looks_like_explicit_request(
+                normalize_message("the 9 pm rebel is really good but i don't want ut")
+            )
+            is False
+        )
+
+    def test_other_negation_phrasings_are_not_explicit(self):
+        for msg in (
+            "my friend uses sauvage but i am not interested in buying it",
+            "someone gifted me sauvage and i will never need another bottle",
+            "sauvage nahi chahiye mujhe abhi",
+        ):
+            assert _looks_like_explicit_request(normalize_message(msg)) is False
+
+    def test_unnegated_cue_word_is_still_explicit(self):
+        """The negation guard must not turn into a blanket suppression —
+        a genuine long-form request with a cue word and no negation nearby
+        still counts."""
+        assert (
+            _looks_like_explicit_request(
+                normalize_message("hey quick question how much do you want for sauvage")
+            )
+            is True
+        )
+
 
 class TestExplicitRequestGateOnFallbackLayers:
     """
