@@ -27,8 +27,8 @@ from app.formatter import (
     build_multi_price_card,
     build_price_card,
 )
-from app.greeting import is_greeting_or_catalog_request
-from app.matcher import match_perfume
+from app.greeting import is_catalog_request, is_greeting_or_catalog_request
+from app.matcher import MatchResult, has_confident_keyword_match, match_perfume
 from app.order_confirmation import is_order_confirmation
 from app.routes_admin import router as admin_router
 
@@ -293,8 +293,24 @@ async def webhook_handler(request: Request):
         _log_outbound(sender, FALLBACK_MESSAGE, success, reason=f"too_long_{len(message_text)}_chars")
         return Response(status_code=200, content="OK")
 
-    # Step 7: Run matching pipeline
-    result = await match_perfume(message_text)
+    # Step 7: Run matching pipeline.
+    #
+    # A catalog-phrase message ("catalogue", "send me the catalogue
+    # please") is vetoed straight to the catalog reply here, BEFORE Groq or
+    # the fuzzy matcher ever run — confirmed in production that both of
+    # those layers could hijack it with a wrong guess instead: Groq's
+    # candidate shortlist is never actually empty (it's always the top 25
+    # nearest-by-fuzzy-score perfumes, however irrelevant), so it would
+    # occasionally return one anyway despite nothing really matching, and
+    # separately the fuzzy matcher scored "please" against the keyword
+    # "pleasure" at 85.7% and matched it. has_confident_keyword_match is a
+    # narrow escape hatch for the rare case a catalog phrase and a real
+    # product both appear together (e.g. "show me sauvage price" must
+    # still return the Sauvage price card, not the catalog link).
+    if is_catalog_request(message_text) and not has_confident_keyword_match(message_text):
+        result = MatchResult()
+    else:
+        result = await match_perfume(message_text)
 
     # Step 8: Build reply — silence by default. Every unmatched message used
     # to get the catalog fallback, which spends a Chat Mitra conversation

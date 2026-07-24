@@ -203,6 +203,31 @@ def _layer1_exact_match(normalized: str) -> MatchResult:
     return MatchResult(ambiguous=True, matched_perfume_ids=sorted_pids)
 
 
+def has_confident_keyword_match(message_text: str) -> bool:
+    """
+    True if the deterministic exact-match layer alone already finds a real
+    perfume (or a genuine multi-perfume/family-collision candidate list) in
+    this message — no LLM call, no fuzzy tolerance, just a precise
+    word-boundary keyword hit.
+
+    Used by app.main as a veto: a message that's clearly a catalog request
+    (see app.greeting.is_catalog_request) should short-circuit straight to
+    the catalog reply UNLESS it also names a specific product this
+    precisely — e.g. "show me sauvage price" should still get the Sauvage
+    price card, not the catalog link, but "catalogue" or "send me the
+    catalogue please" should never reach Groq or the fuzzy matcher at all
+    (confirmed in production: Groq occasionally hallucinated a
+    plausible-looking candidate out of its "nothing really matches"
+    shortlist for bare catalog words, and separately the fuzzy matcher
+    false-positived "please" against the keyword "pleasure" at 85.7%
+    similarity — a wrong single perfume's price card instead of the
+    catalog link).
+    """
+    normalized = normalize_message(message_text)
+    if not normalized:
+        return False
+    result = _layer1_exact_match(normalized)
+    return bool(result.perfume_id or result.matched_perfume_ids)
 
 
 

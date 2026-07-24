@@ -6,7 +6,7 @@ to decide which of those leftover messages are worth a reply at all
 (silence-by-default otherwise, see app/main.py).
 """
 
-from app.greeting import is_greeting_or_catalog_request
+from app.greeting import is_catalog_request, is_greeting_or_catalog_request
 
 
 class TestGreetings:
@@ -55,6 +55,51 @@ class TestCatalogRequests:
 
     def test_all_products(self):
         assert is_greeting_or_catalog_request("show me all products") is True
+
+
+class TestIsCatalogRequest:
+    """
+    is_catalog_request is the narrower, catalog-phrases-only check used as
+    an early veto in app.main — must catch the exact real-world spelling
+    variants that were confirmed getting hijacked into a wrong perfume's
+    price card, and must NOT fire on a bare greeting (that stays through
+    the normal Groq/fuzzy-tolerant pipeline instead).
+    """
+
+    def test_catalogue_british_spelling(self):
+        """The exact reported production bug: 'catalogue' was getting a
+        random perfume's price card instead of the catalog link."""
+        assert is_catalog_request("catalogue") is True
+
+    def test_catalog_american_spelling(self):
+        assert is_catalog_request("catalog") is True
+
+    def test_send_me_the_catalogue_please(self):
+        assert is_catalog_request("send me the catalogue please") is True
+
+    def test_case_insensitive(self):
+        assert is_catalog_request("CATALOGUE") is True
+        assert is_catalog_request("Catalogue") is True
+
+    def test_price_list_phrase(self):
+        assert is_catalog_request("please send price list") is True
+
+    def test_bare_greeting_is_not_a_catalog_request(self):
+        """Deliberately excludes greeting words — "hi" is a common opener
+        before naming a (possibly misspelled) perfume in the same message,
+        so it must stay on the full Groq/fuzzy-tolerant pipeline rather
+        than being vetoed this early."""
+        assert is_catalog_request("hi") is False
+        assert is_catalog_request("hello") is False
+        assert is_catalog_request("good morning") is False
+
+    def test_unrelated_message_is_not_a_catalog_request(self):
+        assert is_catalog_request("thanks bhai") is False
+        assert is_catalog_request("order kab aayega") is False
+
+    def test_empty_message(self):
+        assert is_catalog_request("") is False
+        assert is_catalog_request(None) is False
 
 
 class TestNotGreetingOrCatalogRequest:

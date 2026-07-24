@@ -32,6 +32,7 @@ from app.matcher import (
     _layer2_fuzzy_match,
     _primary_llm_match,
     _top_candidates_for_llm,
+    has_confident_keyword_match,
     match_perfume,
     normalize_message,
 )
@@ -325,6 +326,38 @@ class TestAmbiguousKeywordCollisionCandidates:
         assert result.ambiguous is False
         assert result.perfume_id in synthetic
         assert result.matched_perfume_ids is None
+
+
+class TestHasConfidentKeywordMatch:
+    """
+    has_confident_keyword_match is the deterministic pre-check app.main
+    uses to veto a catalog-phrase message straight to the catalog reply,
+    without ever handing it to Groq or the fuzzy matcher — it must say
+    False for a bare catalog word (the actual production bug) and True
+    whenever a real perfume is also precisely named in the same message.
+    """
+
+    def test_bare_catalog_word_has_no_confident_match(self):
+        assert has_confident_keyword_match("catalogue") is False
+        assert has_confident_keyword_match("catalog") is False
+
+    def test_real_keyword_present_is_confident(self):
+        assert has_confident_keyword_match("how much for sauvage") is True
+
+    def test_family_ambiguity_still_counts_as_confident(self):
+        """A bare "9pm" is a genuine multi-candidate case (matched_perfume_ids,
+        no single perfume_id) — must still count as "found something", since
+        it's a real, precise, deterministic result, not a mismatch risk."""
+        assert has_confident_keyword_match("9pm") is True
+
+    def test_typo_alone_is_not_confident(self):
+        """A misspelling that only fuzzy/LLM could resolve must NOT count —
+        that's exactly the case the veto needs to let through to the full
+        pipeline instead of blocking."""
+        assert has_confident_keyword_match("suvage") is False
+
+    def test_empty_message(self):
+        assert has_confident_keyword_match("") is False
 
 
 class TestLayer2FuzzyMatch:

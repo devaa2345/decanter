@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from app import main
 from app.dedup import dedup_cache
+from app.formatter import FALLBACK_MESSAGE
 from app.main import app
 
 
@@ -190,6 +191,43 @@ class TestWebhookHandler:
         mock_send.assert_called_once()
         reply_text = mock_send.call_args[0][1]
         assert "perfume" in reply_text.lower() or "🙂" in reply_text
+
+    @patch("app.main.match_perfume", new_callable=AsyncMock)
+    @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
+    def test_catalog_phrase_never_reaches_the_matcher(self, mock_send, mock_match, client):
+        """Regression guard for the real production bug: 'catalogue' (and
+        other catalog phrases) were getting a wrong perfume's price card
+        instead of the catalog link, because Groq/fuzzy only got checked
+        AFTER the matcher already guessed something. The veto in app.main
+        must short-circuit to the catalog reply WITHOUT ever calling
+        match_perfume — mocking it here proves that directly rather than
+        just checking the reply text."""
+        for i, msg in enumerate(("catalogue", "catalog", "send me the catalogue please", "Catalogue")):
+            mock_send.reset_mock()
+            mock_match.reset_mock()
+            # Distinct message_id per iteration — the default auto-generated
+            # id is second-precision and these all run within one second,
+            # which would otherwise trip the dedup cache and make later
+            # iterations look like retried duplicates.
+            payload = _make_webhook_payload(msg, message_id=f"catalog_veto_test_{i}")
+            response = client.post("/webhook", json=payload)
+            assert response.status_code == 200
+            mock_match.assert_not_called()
+            mock_send.assert_called_once()
+            reply_text = mock_send.call_args[0][1]
+            assert reply_text == FALLBACK_MESSAGE
+
+    @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
+    def test_catalog_phrase_with_a_real_perfume_still_gets_the_price_card(self, mock_send, client):
+        """The narrow escape hatch: a message that's BOTH a catalog phrase
+        AND names a specific product precisely (exact keyword match) must
+        still return that product's price card, not the catalog link."""
+        payload = _make_webhook_payload("show me sauvage price")
+        response = client.post("/webhook", json=payload)
+        assert response.status_code == 200
+        reply_text = mock_send.call_args[0][1]
+        assert "₹" in reply_text
+        assert "Prepaid" in reply_text
 
     @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
     def test_non_text_message_gets_prompt(self, mock_send, client):
