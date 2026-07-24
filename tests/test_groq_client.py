@@ -73,13 +73,21 @@ def _mock_openai_client(response=None, exception=None):
 
 
 def _json_response(
-    pids, opening: str = "Hey there!", closing: str = "Want me to set that aside?"
+    pids,
+    opening: str = "Hey there!",
+    closing: str = "Want me to set that aside?",
+    explicit_ask: bool = True,
 ) -> str:
     """pids: a single id string (wrapped into a 1-item list) or a list of
-    ids — matches the two shapes tests actually need to construct."""
+    ids — matches the two shapes tests actually need to construct.
+    explicit_ask defaults to True since most tests here are exercising a
+    genuine "customer is asking" scenario — tests specifically about the
+    explicit_ask gate itself pass it explicitly."""
     if isinstance(pids, str):
         pids = [pids]
-    return json.dumps({"perfume_ids": pids, "opening": opening, "closing": closing})
+    return json.dumps(
+        {"perfume_ids": pids, "explicit_ask": explicit_ask, "opening": opening, "closing": closing}
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -103,7 +111,7 @@ class TestBuildSystemPrompt:
         assert excluded_pid not in prompt
         # Sanity bound: three entries should produce a tiny prompt, nowhere
         # near the ~23.5K-token full-catalog prompt that broke production.
-        assert len(prompt) < 2500
+        assert len(prompt) < 3200
 
     def test_forbids_prices_and_asterisks_in_instructions(self):
         """The prompt itself must tell the model never to write numbers or
@@ -127,48 +135,60 @@ class TestBuildSystemPrompt:
         assert "perfume_ids" in prompt
         assert "2+" in prompt or "multiple" in prompt.lower()
 
+    def test_instructs_the_explicit_ask_vs_passing_mention_distinction(self):
+        """The core new behavior: the prompt must tell the model to tell
+        apart an actual request from a perfume name merely mentioned in
+        passing — this is the fix for the "auto-fires a price card mid
+        human conversation" production bug."""
+        prompt = groq_client._build_system_prompt(CANDIDATES)
+        assert "explicit_ask" in prompt
+        assert "passing" in prompt.lower() or "mention" in prompt.lower()
+
 
 class TestParseResponse:
     """_parse_response is the defensive-parsing boundary — malformed model
     output must degrade gracefully, never raise."""
 
     def test_well_formed_json_single_id(self):
-        pids, opening, closing = groq_client._parse_response(_json_response(_REAL_PID))
+        pids, explicit_ask, opening, closing = groq_client._parse_response(
+            _json_response(_REAL_PID)
+        )
         assert pids == [_REAL_PID]
+        assert explicit_ask is True
         assert opening == "Hey there!"
         assert closing == "Want me to set that aside?"
 
     def test_well_formed_json_multiple_ids(self):
-        pids, _, _ = groq_client._parse_response(_json_response([_REAL_PID, _OTHER_PID]))
+        pids, _, _, _ = groq_client._parse_response(_json_response([_REAL_PID, _OTHER_PID]))
         assert pids == [_REAL_PID, _OTHER_PID]
 
     def test_case_normalized(self):
-        pids, _, _ = groq_client._parse_response(_json_response(_REAL_PID.upper()))
+        pids, _, _, _ = groq_client._parse_response(_json_response(_REAL_PID.upper()))
         assert pids == [_REAL_PID]
 
     def test_duplicate_ids_deduplicated_preserving_order(self):
-        pids, _, _ = groq_client._parse_response(
+        pids, _, _, _ = groq_client._parse_response(
             _json_response([_REAL_PID, _OTHER_PID, _REAL_PID])
         )
         assert pids == [_REAL_PID, _OTHER_PID]
 
     def test_missing_perfume_ids_key_returns_empty_list(self):
-        pids, opening, _ = groq_client._parse_response(json.dumps({"opening": "Hi"}))
+        pids, _, opening, _ = groq_client._parse_response(json.dumps({"opening": "Hi"}))
         assert pids == []
         assert opening == "Hi"
 
     def test_perfume_ids_not_a_list_returns_empty_list(self):
-        pids, _, _ = groq_client._parse_response(json.dumps({"perfume_ids": _REAL_PID}))
+        pids, _, _, _ = groq_client._parse_response(json.dumps({"perfume_ids": _REAL_PID}))
         assert pids == []
 
     def test_non_string_entries_in_list_are_skipped(self):
-        pids, _, _ = groq_client._parse_response(
+        pids, _, _, _ = groq_client._parse_response(
             json.dumps({"perfume_ids": [_REAL_PID, 123, None, _OTHER_PID]})
         )
         assert pids == [_REAL_PID, _OTHER_PID]
 
     def test_empty_list_returns_empty_list(self):
-        pids, _, closing = groq_client._parse_response(
+        pids, _, _, closing = groq_client._parse_response(
             json.dumps({"perfume_ids": [], "opening": "Not sure!", "closing": ""})
         )
         assert pids == []
@@ -177,19 +197,23 @@ class TestParseResponse:
         assert closing is None
 
     def test_invalid_json_returns_all_empty(self):
-        pids, opening, closing = groq_client._parse_response("uh, what?")
+        pids, explicit_ask, opening, closing = groq_client._parse_response("uh, what?")
         assert pids == []
+        assert explicit_ask is False
         assert opening is None
         assert closing is None
 
     def test_json_array_instead_of_object_returns_all_empty(self):
-        pids, opening, closing = groq_client._parse_response(json.dumps(["not", "an", "object"]))
+        pids, explicit_ask, opening, closing = groq_client._parse_response(
+            json.dumps(["not", "an", "object"])
+        )
         assert pids == []
+        assert explicit_ask is False
         assert opening is None
         assert closing is None
 
     def test_non_string_opening_closing_ignored_gracefully(self):
-        pids, opening, closing = groq_client._parse_response(
+        pids, _, opening, closing = groq_client._parse_response(
             json.dumps({"perfume_ids": [_REAL_PID], "opening": None, "closing": ["a", "list"]})
         )
         assert pids == [_REAL_PID]
@@ -202,8 +226,34 @@ class TestParseResponse:
         structurally can't produce that shape at all, so there's nothing
         equivalent to test here except confirming plain non-JSON text is
         rejected cleanly (covered by test_invalid_json_returns_all_empty)."""
-        pids, _, _ = groq_client._parse_response("dior_sauvage_edt: Dior Sauvage EDT")
+        pids, _, _, _ = groq_client._parse_response("dior_sauvage_edt: Dior Sauvage EDT")
         assert pids == []
+
+    def test_explicit_ask_true_is_parsed(self):
+        _, explicit_ask, _, _ = groq_client._parse_response(
+            _json_response(_REAL_PID, explicit_ask=True)
+        )
+        assert explicit_ask is True
+
+    def test_explicit_ask_false_is_parsed(self):
+        _, explicit_ask, _, _ = groq_client._parse_response(
+            _json_response(_REAL_PID, explicit_ask=False)
+        )
+        assert explicit_ask is False
+
+    def test_explicit_ask_missing_defaults_to_false(self):
+        """Fail closed: an older/malformed response without the field must
+        never be silently treated as a confident ask."""
+        _, explicit_ask, _, _ = groq_client._parse_response(
+            json.dumps({"perfume_ids": [_REAL_PID], "opening": "Hi", "closing": "Ok"})
+        )
+        assert explicit_ask is False
+
+    def test_explicit_ask_non_boolean_defaults_to_false(self):
+        _, explicit_ask, _, _ = groq_client._parse_response(
+            json.dumps({"perfume_ids": [_REAL_PID], "explicit_ask": "yes"})
+        )
+        assert explicit_ask is False
 
 
 class TestClassifyAndPhrase:
@@ -212,7 +262,10 @@ class TestClassifyAndPhrase:
         with patch("app.groq_client.AsyncOpenAI", return_value=fake):
             result = asyncio.run(classify_and_phrase("some message", candidates=CANDIDATES))
         assert result == GroqClassification(
-            perfume_ids=[_REAL_PID], opening="Hey there!", closing="Want me to set that aside?"
+            perfume_ids=[_REAL_PID],
+            explicit_ask=True,
+            opening="Hey there!",
+            closing="Want me to set that aside?",
         )
 
     def test_multiple_distinct_perfumes_are_all_returned(self):
@@ -249,6 +302,36 @@ class TestClassifyAndPhrase:
             with patch("app.groq_client.AsyncOpenAI", return_value=fake):
                 result = asyncio.run(classify_and_phrase("hello there", candidates=CANDIDATES))
             assert result == GroqClassification()
+
+    def test_explicit_ask_false_collapses_to_empty_classification(self):
+        """The core new behavior this file exists to cover: a perfume
+        mentioned only in passing (explicit_ask=false) must be treated
+        exactly like no match at all, even though a real candidate id was
+        returned — confirmed in production that a bare name mention mid-
+        conversation was still auto-firing a price card."""
+        fake, _ = _mock_openai_client(
+            response=_mock_response(_json_response(_REAL_PID, explicit_ask=False))
+        )
+        with patch("app.groq_client.AsyncOpenAI", return_value=fake):
+            result = asyncio.run(
+                classify_and_phrase(
+                    "the owner told me sauvage is really nice apparently",
+                    candidates=CANDIDATES,
+                )
+            )
+        assert result == GroqClassification()
+
+    def test_explicit_ask_missing_from_response_collapses_to_empty_classification(self):
+        """Same as above, but for a response that omits the field entirely
+        (older/imperfect model compliance) rather than setting it false."""
+        fake, _ = _mock_openai_client(
+            response=_mock_response(
+                json.dumps({"perfume_ids": [_REAL_PID], "opening": "Hi", "closing": "Ok"})
+            )
+        )
+        with patch("app.groq_client.AsyncOpenAI", return_value=fake):
+            result = asyncio.run(classify_and_phrase("some message", candidates=CANDIDATES))
+        assert result == GroqClassification()
 
     def test_ids_not_in_candidates_are_filtered_out(self):
         """Defensive validation: even if the LLM hallucinates a plausible-

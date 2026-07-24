@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 from app import main
 from app.dedup import dedup_cache
 from app.formatter import FALLBACK_MESSAGE
+from app.groq_client import GroqClassification
 from app.main import app
 
 
@@ -300,6 +301,29 @@ class TestWebhookHandler:
         assert PERFUMES[pid_a]["display_name"].upper() in reply_text
         assert PERFUMES[pid_b]["display_name"].upper() in reply_text
         assert reply_text.count("Prepaid only") == 1
+
+    @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
+    def test_perfume_name_mentioned_in_passing_stays_silent(self, mock_send, client):
+        """The reported production bug: a customer mentioning a perfume
+        name mid-conversation (e.g. talking to the shop owner about
+        something else) must not auto-fire a price card — only an
+        explicit ask should. classify_and_phrase is mocked to return an
+        empty classification here (standing in for either a real Groq
+        outage or Groq's own explicit_ask=false judgment collapsing to the
+        same empty result — see app.groq_client), which exercises the
+        deterministic fallback layer's own explicit-request gate end to
+        end through the real webhook handler."""
+        with patch(
+            "app.groq_client.classify_and_phrase",
+            new_callable=AsyncMock,
+            return_value=GroqClassification(),
+        ):
+            payload = _make_webhook_payload(
+                "the owner told me sauvage is really nice apparently"
+            )
+            response = client.post("/webhook", json=payload)
+        assert response.status_code == 200
+        mock_send.assert_not_called()
 
     @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
     def test_ambiguous_9pm_lists_all_real_candidates(self, mock_send, client):

@@ -30,6 +30,7 @@ from app.matcher import (
     _keyword_boundary_regex,
     _layer1_exact_match,
     _layer2_fuzzy_match,
+    _looks_like_explicit_request,
     _primary_llm_match,
     _top_candidates_for_llm,
     has_confident_keyword_match,
@@ -730,3 +731,94 @@ class TestMatchPerfumeGroqFirstWithFallback:
             result = asyncio.run(match_perfume("completely unrelated gibberish qzxjklw"))
         assert result.perfume_id is None
         assert result.ambiguous is False
+
+
+class TestLooksLikeExplicitRequest:
+    """
+    Deterministic stand-in for Groq's explicit_ask judgment, used only by
+    the exact/fuzzy fallback layers (see match_perfume) — Groq itself is
+    unavailable whenever these run, so there's no LLM to ask. A short
+    message is treated as explicit outright; a longer one needs an actual
+    request cue word.
+    """
+
+    def test_bare_name_is_explicit(self):
+        assert _looks_like_explicit_request("sauvage") is True
+
+    def test_name_plus_size_is_explicit(self):
+        assert _looks_like_explicit_request("sauvage 10ml") is True
+
+    def test_long_message_with_a_price_cue_is_explicit(self):
+        assert (
+            _looks_like_explicit_request(
+                "hey quick question how much is sauvage going for these days"
+            )
+            is True
+        )
+
+    def test_long_message_naming_a_perfume_without_a_cue_is_not_explicit(self):
+        """The exact reported bug: a perfume name surfacing mid-conversation
+        (e.g. talking to the shop owner about something else) is not a
+        request just because the name is technically present."""
+        assert (
+            _looks_like_explicit_request("the owner told me sauvage is really nice apparently")
+            is False
+        )
+
+    def test_empty_message_is_not_explicit(self):
+        assert _looks_like_explicit_request("") is False
+
+
+class TestExplicitRequestGateOnFallbackLayers:
+    """
+    match_perfume end-to-end with Groq mocked away (simulating either a real
+    outage or Groq's own explicit_ask=false collapsing to an empty
+    classification) — the deterministic exact/fuzzy fallback must apply the
+    same "mention vs. ask" distinction, not just fire on any keyword hit.
+    """
+
+    def test_bare_name_still_matches_via_fallback(self):
+        with patch(
+            "app.groq_client.classify_and_phrase",
+            new_callable=AsyncMock,
+            return_value=GroqClassification(),
+        ):
+            result = asyncio.run(match_perfume("sauvage"))
+        assert result.perfume_id is not None
+        assert result.layer == "exact"
+
+    def test_name_with_request_cue_still_matches_via_fallback(self):
+        with patch(
+            "app.groq_client.classify_and_phrase",
+            new_callable=AsyncMock,
+            return_value=GroqClassification(),
+        ):
+            result = asyncio.run(match_perfume("what is the price of sauvage please"))
+        assert result.perfume_id is not None
+
+    def test_name_mentioned_in_passing_mid_conversation_stays_silent(self):
+        """The reported production bug, reproduced directly against
+        match_perfume: a perfume name inside a longer, unrelated sentence
+        (no price/buy/availability cue) must not auto-fire a price card."""
+        with patch(
+            "app.groq_client.classify_and_phrase",
+            new_callable=AsyncMock,
+            return_value=GroqClassification(),
+        ):
+            result = asyncio.run(
+                match_perfume("the owner told me sauvage is really nice apparently")
+            )
+        assert result.perfume_id is None
+        assert result.matched_perfume_ids is None
+        assert result.ambiguous is False
+
+    def test_typo_mentioned_in_passing_stays_silent_via_fuzzy_fallback_too(self):
+        with patch(
+            "app.groq_client.classify_and_phrase",
+            new_callable=AsyncMock,
+            return_value=GroqClassification(),
+        ):
+            result = asyncio.run(
+                match_perfume("my friend recently bought a bottle of suvage last week apparently")
+            )
+        assert result.perfume_id is None

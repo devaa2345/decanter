@@ -9,6 +9,17 @@ order as before this became LLM-first:
   2. Fuzzy string match via rapidfuzz (free, fast)
 This means the bot never goes fully silent on a Groq outage or rate limit.
 
+A perfume name found by ANY layer only becomes a real match if the message
+also looks like an explicit request, not just a mention. Confirmed in
+production: a customer naming a perfume mid-conversation (recalling a past
+purchase, saying what a friend or the shop owner wears, chit-chat that
+happens to name a perfume) was still auto-firing a full price card, which
+reads as the bot barging into a human conversation. Groq judges this itself
+via classify_and_phrase's explicit_ask field (it sees the whole sentence,
+so it can tell a bare "sauvage" apart from "the owner said sauvage is
+nice"); the exact/fuzzy fallback layers below use a cheaper deterministic
+stand-in (_looks_like_explicit_request) for when Groq itself is down.
+
 All prices come from catalog.py, NEVER from the LLM — Groq only picks
 *which* perfume and writes short opening/closing phrasing around the price
 card; the numbers themselves are always assembled deterministically (see
@@ -231,6 +242,44 @@ def has_confident_keyword_match(message_text: str) -> bool:
 
 
 
+# Request-intent cues for the deterministic fallback layers only — Groq
+# (the primary path, see _primary_llm_match/app.groq_client) makes this same
+# judgment itself via classify_and_phrase's explicit_ask field, reading the
+# full sentence far better than a keyword list ever could. This is a
+# coarser stand-in for the rare case Groq itself is unavailable (API error/
+# timeout/no key), so the free exact/fuzzy layers don't regress to the
+# original bug: firing a price card on a perfume name merely mentioned in
+# passing (recalling a past purchase, naming what a friend/the shop owner
+# wears, mid-conversation chit-chat) instead of an actual request.
+_REQUEST_CUES: tuple[str, ...] = (
+    "price", "prices", "cost", "costs", "rate", "rates", "mrp",
+    "how much", "kitna", "kitne", "kitni", "available", "availability",
+    "stock", "ml", "size", "sizes", "decant", "sample", "samples",
+    "buy", "want", "need", "order", "send", "interested", "info",
+    "information", "details", "detail", "quote", "catalog", "catalogue",
+)
+
+# A message this short that still contains a real keyword match is almost
+# always the customer directly naming what they want ("sauvage", "bleu de
+# chanel 10ml") rather than a passing mention buried inside a longer,
+# unrelated sentence.
+_SHORT_MESSAGE_WORD_LIMIT = 5
+
+
+def _looks_like_explicit_request(normalized: str) -> bool:
+    """
+    Deterministic stand-in for Groq's explicit_ask judgment (see module
+    docstring), used only by the exact/fuzzy fallback layers inside
+    match_perfume.
+    """
+    if not normalized:
+        return False
+    words = normalized.split()
+    if len(words) <= _SHORT_MESSAGE_WORD_LIMIT:
+        return True
+    return any(cue in normalized for cue in _REQUEST_CUES)
+
+
 def _build_ngram_candidates(normalized: str) -> list[str]:
     """
     Words plus 2-word and 3-word sliding windows from the message — shared
@@ -419,9 +468,11 @@ async def match_perfume(message_text: str) -> MatchResult:
         )
         return result
 
-    # Fallback: exact/substring match
+    # Fallback: exact/substring match — gated by _looks_like_explicit_request
+    # (see module docstring): a keyword found inside a long message with no
+    # request cue is treated as a passing mention, not a match.
     result = _layer1_exact_match(normalized)
-    if result.perfume_id or result.ambiguous:
+    if (result.perfume_id or result.ambiguous) and _looks_like_explicit_request(normalized):
         logger.info(
             "Fallback exact match: pid=%s, keyword=%s, ambiguous=%s",
             result.perfume_id,
@@ -430,9 +481,9 @@ async def match_perfume(message_text: str) -> MatchResult:
         )
         return result
 
-    # Fallback: fuzzy match
+    # Fallback: fuzzy match — same explicit-request gate as above.
     result = _layer2_fuzzy_match(normalized)
-    if result.perfume_id or result.ambiguous:
+    if (result.perfume_id or result.ambiguous) and _looks_like_explicit_request(normalized):
         logger.info(
             "Fallback fuzzy match: pid=%s, keyword=%s, score=%.1f, ambiguous=%s",
             result.perfume_id,

@@ -14,6 +14,18 @@ customer message can clearly name multiple distinct perfumes at once (e.g.
 more than one, silently dropping every match but the first. Most messages
 still resolve to exactly one id — this is the same shape either way.
 
+explicit_ask distinguishes "customer is asking about this perfume right
+now" from "customer merely said its name" — confirmed in production that a
+perfume name surfacing mid-conversation (recalling a past purchase, saying
+what a friend or the shop owner wears, chatting about something else that
+happens to name a perfume) was still auto-firing a price card, which reads
+as the bot barging into a human conversation. An LLM that sees the whole
+message is far better positioned to judge this than a keyword list, so it's
+asked for directly as part of the same structured response rather than
+bolted on afterward. classify_and_phrase collapses the result to an empty
+GroqClassification whenever explicit_ask isn't true — treated by the caller
+(app.matcher) exactly like "no confident match" either way.
+
 JSON mode (response_format={"type": "json_object"}), not a free-text label
 format: confirmed directly against llama-3.1-8b-instant that a plain-text
 "PERFUME_ID: ..." convention isn't followed reliably — a real observed
@@ -46,11 +58,13 @@ _MODEL = "llama-3.1-8b-instant"
 @dataclass
 class GroqClassification:
     """Result of classify_and_phrase. perfume_ids is empty whenever Groq
-    wasn't confident about any candidate — opening/closing are only ever
+    wasn't confident about any candidate, or wasn't confident this was an
+    explicit ask (see explicit_ask) — opening/closing are only ever
     populated alongside a non-empty perfume_ids, since they're useless
     without one (the caller falls through to the free matcher instead)."""
 
     perfume_ids: list[str] = field(default_factory=list)
+    explicit_ask: bool = False
     opening: str | None = None
     closing: str | None = None
 
@@ -69,33 +83,39 @@ CANDIDATES (id: name):
 {perfume_list}
 
 Respond ONLY with a JSON object in exactly this shape, nothing else:
-{{"perfume_ids": ["<id from the list above>", ...], "opening": "<one short, friendly line>", "closing": "<one short, friendly line>"}}
+{{"perfume_ids": ["<id from the list above>", ...], "explicit_ask": true/false, "opening": "<one short, friendly line>", "closing": "<one short, friendly line>"}}
 
 RULES:
 - perfume_ids lists every id from the list above that the customer is clearly asking about. Most messages name exactly ONE perfume, so this is usually a single-item list.
 - If the customer's message clearly names 2+ different perfumes (e.g. "sauvage and eros price", "bleu de chanel 5ml and versace eros 10ml"), include all of them — never drop one to only answer part of the question.
 - If the message names something too vague to tell which ONE specific candidate they mean (e.g. just a product line/series name with 2+ real variants in the candidate list), include all of the genuinely plausible candidates rather than guessing a single one.
 - Use an empty list [] if nothing in the candidate list clearly matches. Never include an id that isn't in the candidate list above.
-- If perfume_ids is non-empty, you are CONFIDENT — opening must sound definitive and matter-of-fact ("Sauvage is one of our favorites!"), never hedge or ask the customer for more details ("which one did you mean?", "can you tell me more?") — that contradicts having just picked it.
+- explicit_ask is true only if the customer is actually asking about price, availability, or buying a perfume right now. False if the name is only mentioned in passing — a past purchase, what a friend/the shop owner wears, chit-chat that happens to name it — without actually asking. A bare name or name+size (e.g. "sauvage 10ml") IS an explicit ask. If perfume_ids is empty, this must be false.
+- If perfume_ids is non-empty AND explicit_ask is true, you are CONFIDENT — opening must sound definitive and matter-of-fact ("Sauvage is one of our favorites!"), never hedge or ask the customer for more details ("which one did you mean?", "can you tell me more?") — that contradicts having just picked it.
 - opening and closing must NEVER contain a price, number, size, or currency symbol — that data comes from us, not you. Including a number is a mistake.
 - Under 15 words each. Sound like a real person texting, not a script. Hinglish is fine if the customer wrote that way. At most one emoji total.
 - Never use the asterisk character (*) anywhere.
-- If perfume_ids is empty, still write a brief natural opening acknowledging you're unsure, and set closing to an empty string."""
+- If perfume_ids is empty or explicit_ask is false, still write a brief natural opening, and set closing to an empty string."""
 
 
-def _parse_response(text: str) -> tuple[list[str], str | None, str | None]:
+def _parse_response(text: str) -> tuple[list[str], bool, str | None, str | None]:
     """Parse the JSON response. Any failure (invalid JSON, wrong shape,
-    non-string fields) returns ([], None, None) rather than raising —
-    treated by the caller exactly like "no confident match"."""
+    non-string fields) returns ([], False, None, None) rather than raising —
+    treated by the caller exactly like "no confident match". A missing or
+    non-boolean explicit_ask defaults to False (fail closed) rather than
+    True — an unconfirmed request is exactly the "just mentioned it" case
+    this field exists to catch, so treating it as an ask by default would
+    reopen the bug."""
     try:
         data = json.loads(text)
     except (json.JSONDecodeError, TypeError):
-        return [], None, None
+        return [], False, None, None
 
     if not isinstance(data, dict):
-        return [], None, None
+        return [], False, None, None
 
     raw_pids = data.get("perfume_ids")
+    explicit_ask = data.get("explicit_ask") is True
     opening = data.get("opening")
     closing = data.get("closing")
 
@@ -110,7 +130,7 @@ def _parse_response(text: str) -> tuple[list[str], str | None, str | None]:
     opening = opening.strip() if isinstance(opening, str) and opening.strip() else None
     closing = closing.strip() if isinstance(closing, str) and closing.strip() else None
 
-    return pids, opening, closing
+    return pids, explicit_ask, opening, closing
 
 
 async def classify_and_phrase(message: str, candidates: dict[str, dict]) -> GroqClassification:
@@ -120,9 +140,10 @@ async def classify_and_phrase(message: str, candidates: dict[str, dict]) -> Groq
     assembled) price card(s).
 
     Never raises — any failure (missing key, API error, malformed/
-    unparseable response, no valid ids among the offered candidates) returns
-    an empty GroqClassification, which the caller (app.matcher) treats as
-    "fall through to the free exact/fuzzy matcher" rather than a hard failure.
+    unparseable response, no valid ids among the offered candidates, or a
+    valid id that isn't an explicit ask — see explicit_ask) returns an empty
+    GroqClassification, which the caller (app.matcher) treats as "fall
+    through to the free exact/fuzzy matcher" rather than a hard failure.
     """
     if not settings.GROQ_API_KEY or not candidates:
         return GroqClassification()
@@ -147,10 +168,10 @@ async def classify_and_phrase(message: str, candidates: dict[str, dict]) -> Groq
         raw = response.choices[0].message.content or ""
         logger.info("Groq classify_and_phrase response: %r", raw)
 
-        pids, opening, closing = _parse_response(raw)
+        pids, explicit_ask, opening, closing = _parse_response(raw)
 
         valid_pids = [pid for pid in pids if pid in candidates]
-        if not valid_pids:
+        if not valid_pids or not explicit_ask:
             return GroqClassification()
 
         # Safety net: a confident match should never hedge ("which one did
@@ -164,7 +185,9 @@ async def classify_and_phrase(message: str, candidates: dict[str, dict]) -> Groq
         if opening and "?" in opening:
             opening = None
 
-        return GroqClassification(perfume_ids=valid_pids, opening=opening, closing=closing)
+        return GroqClassification(
+            perfume_ids=valid_pids, explicit_ask=True, opening=opening, closing=closing
+        )
 
     except Exception:
         logger.exception("Groq classify_and_phrase call failed")
