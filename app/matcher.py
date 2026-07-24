@@ -99,10 +99,13 @@ def _layer1_exact_match(normalized: str) -> MatchResult:
     in the message (word-boundary match, not raw substring — see
     _keyword_boundary_regex).
 
-    If multiple perfumes match, prefer the longest/most-specific keyword.
-    Only return ambiguous if the customer clearly mentions 2+ distinct
-    perfumes with similar specificity — NOT when a short keyword
-    accidentally matches multiple entries.
+    A single matched perfume resolves directly. Multiple matches from the
+    same shared keyword (e.g. a bare "sauvage" matching several concentration
+    variants) are a single ambiguous item — pick the best one. Multiple
+    matches from genuinely different keyword strings mean the customer named
+    multiple distinct perfumes — every one of those is returned via
+    matched_perfume_ids so the reply can show a full card for each, instead
+    of guessing one and dropping the rest.
     """
     matches: list[tuple[str, str, int]] = []  # (perfume_id, keyword, keyword_len)
 
@@ -167,34 +170,29 @@ def _layer1_exact_match(normalized: str) -> MatchResult:
             matched_keyword=kw,
         )
 
-    # Multiple perfumes matched — always pick the longest keyword match.
-    # This resolves most cases where a generic word like "sauvage" matches
-    # multiple clones, but the specific fragrance name is longer.
-    # Sort unique_pids by their best keyword length descending.
+    # 2+ different perfumes matched. Two genuinely different situations look
+    # the same at this point and need different replies:
+    #
+    #   1. Every match came from the exact same keyword string (e.g. a bare
+    #      "sauvage" matching several concentration variants of one product
+    #      line). The customer named ONE thing; we're just unsure which
+    #      variant — pick the longest/first match as before.
+    #
+    #   2. Different keyword strings matched different perfumes (e.g.
+    #      "sauvage and eros price" — "sauvage" and "eros" are unrelated
+    #      words that each identify a real, distinct product). The customer
+    #      clearly asked about multiple perfumes — confirmed in production
+    #      that the old length-based tie-break silently kept only the
+    #      longest-keyword match and dropped the rest, which is exactly the
+    #      "shows one random perfume's detail" bug. Every one of these is a
+    #      genuine candidate, so return all of them and let the reply build
+    #      a full price card for each.
     sorted_pids = sorted(unique_pids, key=lambda p: seen_pids[p][1], reverse=True)
+    distinct_keywords = {seen_pids[pid][0] for pid in unique_pids}
 
-    best_pid = sorted_pids[0]
-    best_kw, best_len = seen_pids[best_pid]
-    second_pid = sorted_pids[1]
-    _, second_len = seen_pids[second_pid]
-
-    # If the best match has a significantly longer keyword, it's the clear winner
-    if best_len > second_len:
-        return MatchResult(
-            perfume_id=best_pid,
-            layer="exact",
-            confidence=95.0,
-            matched_keyword=best_kw,
-        )
-
-    # Keywords are the same length — check if the customer genuinely
-    # mentioned two distinct perfume names (not just two entries that
-    # share a common generic word)
-    # If both keywords are the same string, it's a shared-keyword collision
-    second_kw, _ = seen_pids[second_pid]
-    if best_kw == second_kw:
-        # Same keyword matched multiple perfumes — just pick the first
-        # (this is an ambiguity in the catalog, not in the customer message)
+    if len(distinct_keywords) == 1:
+        best_pid = sorted_pids[0]
+        best_kw, _ = seen_pids[best_pid]
         return MatchResult(
             perfume_id=best_pid,
             layer="exact",
@@ -202,12 +200,7 @@ def _layer1_exact_match(normalized: str) -> MatchResult:
             matched_keyword=best_kw,
         )
 
-    # Different keywords of similar length — likely the customer genuinely
-    # mentioned two different perfumes. List every pid tied for the longest
-    # keyword — those are the genuine competing candidates; anything with a
-    # strictly shorter keyword was already outranked and isn't a real option.
-    tied_pids = [pid for pid in sorted_pids if seen_pids[pid][1] == best_len]
-    return MatchResult(ambiguous=True, matched_perfume_ids=tied_pids)
+    return MatchResult(ambiguous=True, matched_perfume_ids=sorted_pids)
 
 
 
@@ -331,12 +324,17 @@ async def _primary_llm_match(normalized: str) -> MatchResult:
     Primary match: Groq LLM classification + reply phrasing, tried FIRST for
     every message (not a last resort — see match_perfume below).
 
-    Asks the LLM to identify which perfume_id the message refers to, choosing
+    Asks the LLM to identify which perfume(s) the message refers to, choosing
     only from a pre-narrowed shortlist (see _top_candidates_for_llm) — never
     the full catalog, which is what keeps every call safely under Groq's
     per-minute token limit. Never generates prices — see app.groq_client and
     app.formatter for how opening/closing phrasing stays separate from the
     deterministic price grid.
+
+    Groq can return 2+ ids when the customer clearly named multiple distinct
+    perfumes — that's surfaced the same way the fallback exact matcher
+    surfaces it (matched_perfume_ids, ambiguous=True), so app.main builds a
+    full price card for each regardless of which layer found them.
     """
     from app.groq_client import classify_and_phrase
 
@@ -346,9 +344,22 @@ async def _primary_llm_match(normalized: str) -> MatchResult:
 
     try:
         result = await classify_and_phrase(normalized, candidates=candidates)
-        if result.perfume_id and result.perfume_id in candidates:
+        # Defense in depth even though app.groq_client already validates
+        # this — an id outside what was offered must never be trusted.
+        valid_pids = [pid for pid in result.perfume_ids if pid in candidates]
+
+        if len(valid_pids) == 1:
             return MatchResult(
-                perfume_id=result.perfume_id,
+                perfume_id=valid_pids[0],
+                layer="llm",
+                confidence=80.0,
+                opening=result.opening,
+                closing=result.closing,
+            )
+        if len(valid_pids) > 1:
+            return MatchResult(
+                ambiguous=True,
+                matched_perfume_ids=valid_pids,
                 layer="llm",
                 confidence=80.0,
                 opening=result.opening,
@@ -375,8 +386,12 @@ async def match_perfume(message_text: str) -> MatchResult:
 
     # Primary: Groq LLM classification + phrasing (async)
     result = await _primary_llm_match(normalized)
-    if result.perfume_id:
-        logger.info("Primary LLM match: pid=%s", result.perfume_id)
+    if result.perfume_id or result.matched_perfume_ids:
+        logger.info(
+            "Primary LLM match: pid=%s, matched_perfume_ids=%s",
+            result.perfume_id,
+            result.matched_perfume_ids,
+        )
         return result
 
     # Fallback: exact/substring match

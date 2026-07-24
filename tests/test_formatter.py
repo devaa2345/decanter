@@ -16,7 +16,7 @@ from app.formatter import (
     FALLBACK_MESSAGE,
     NON_TEXT_MESSAGE,
     WILL_CONTACT_LINE,
-    build_ambiguous_card,
+    build_multi_price_card,
     build_price_card,
 )
 from app.catalog import PERFUMES, SHIPPING_CARD
@@ -103,56 +103,63 @@ class TestBuildPriceCard:
         assert card.index(SHIPPING_CARD) < card.index(WILL_CONTACT_LINE)
 
 
-class TestBuildAmbiguousCard:
+class TestBuildMultiPriceCard:
     """
-    When multiple perfumes are genuinely ambiguous, the reply must list
-    them (name + price range) rather than just asking "which one?" with no
-    information for the customer to act on.
+    When 2+ perfumes are found in one message — whether the customer
+    clearly asked about multiple distinct products (e.g. "sauvage and eros
+    price") or a single mention was ambiguous among close variants (e.g.
+    bare "9pm") — the reply must show a FULL price card for each one, not
+    just a name + price range, and not silently pick only one.
     """
 
-    def test_lists_every_candidate_with_name_and_price_range(self):
+    def test_shows_a_full_price_card_for_each_perfume(self):
         pids = list(PERFUMES)[:2]
-        card = build_ambiguous_card(pids)
+        card = build_multi_price_card(pids)
         for pid in pids:
-            assert PERFUMES[pid]["display_name"] in card
-        assert "1." in card
-        assert "2." in card
+            display_name = PERFUMES[pid]["display_name"]
+            assert display_name.upper() in card
+            for size, price in PERFUMES[pid]["prices"].items():
+                assert f"₹{price:,}" in card
 
-    def test_numbered_in_the_given_order(self):
+    def test_perfumes_appear_in_the_given_order(self):
         pids = list(PERFUMES)[:3]
-        card = build_ambiguous_card(pids)
-        idx = [card.index(PERFUMES[pid]["display_name"]) for pid in pids]
+        card = build_multi_price_card(pids)
+        idx = [card.index(PERFUMES[pid]["display_name"].upper()) for pid in pids]
         assert idx == sorted(idx)
 
-    def test_price_range_shown_low_to_high(self):
-        pid = next(iter(PERFUMES))
-        card = build_ambiguous_card([pid])
-        prices = PERFUMES[pid]["prices"].values()
-        assert f"₹{min(prices):,}" in card
-        if min(prices) != max(prices):
-            assert f"₹{max(prices):,}" in card
+    def test_shipping_card_and_closing_appear_only_once(self):
+        """One shared shipping card + closing line at the end, not repeated
+        per perfume — keeps a multi-perfume reply from ballooning."""
+        pids = list(PERFUMES)[:3]
+        card = build_multi_price_card(pids)
+        assert card.count("Prepaid only") == 1
+        assert card.count(WILL_CONTACT_LINE) == 1
 
     def test_none_falls_back_to_plain_ambiguous_message(self):
-        assert build_ambiguous_card(None) == AMBIGUOUS_MESSAGE
+        assert build_multi_price_card(None) == AMBIGUOUS_MESSAGE
 
     def test_empty_list_falls_back_to_plain_ambiguous_message(self):
-        assert build_ambiguous_card([]) == AMBIGUOUS_MESSAGE
+        assert build_multi_price_card([]) == AMBIGUOUS_MESSAGE
 
     def test_truncates_beyond_the_cap_with_a_count(self):
         many_pids = list(PERFUMES)[:15]
-        card = build_ambiguous_card(many_pids)
+        card = build_multi_price_card(many_pids)
         assert "more" in card.lower()
         # Only the capped number of names should actually appear, not all 15
-        shown_names = sum(1 for pid in many_pids if PERFUMES[pid]["display_name"] in card)
+        shown_names = sum(
+            1 for pid in many_pids if PERFUMES[pid]["display_name"].upper() in card
+        )
         assert shown_names < len(many_pids)
 
-    def test_ends_with_a_reply_prompt(self):
-        card = build_ambiguous_card([next(iter(PERFUMES))])
-        assert "reply" in card.lower()
+    def test_opening_prepended_and_closing_used_when_given(self):
+        pids = list(PERFUMES)[:2]
+        card = build_multi_price_card(pids, opening="Found a couple!", closing="Let us know!")
+        assert card.startswith("Found a couple!")
+        assert card.endswith("Let us know!")
 
     def test_no_asterisks_or_untested_characters(self):
         pids = list(PERFUMES)[:3]
-        card = build_ambiguous_card(pids)
+        card = build_multi_price_card(pids)
         assert "*" not in card
         for risky_char in ("🌸", "🚚", "|", "#"):
             assert risky_char not in card

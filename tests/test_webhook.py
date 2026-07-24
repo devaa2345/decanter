@@ -239,16 +239,42 @@ class TestWebhookHandler:
         assert response.status_code == 200
 
     @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
+    @patch("app.main.match_perfume", new_callable=AsyncMock)
+    def test_multiple_distinct_perfumes_named_get_a_card_each(self, mock_match, mock_send, client):
+        """The reported production bug: a customer naming 2+ distinct
+        perfumes in one message (e.g. "sauvage and eros price") must get a
+        full price card for EACH one, not just one random perfume's detail.
+        match_perfume is patched directly here so this is a deterministic
+        check of the webhook's reply-building branch, independent of which
+        underlying layer (Groq or the free fallback matchers) actually
+        resolved the multiple ids."""
+        from app.catalog import PERFUMES
+        from app.matcher import MatchResult
+
+        pid_a, pid_b = list(PERFUMES)[:2]
+        mock_match.return_value = MatchResult(ambiguous=True, matched_perfume_ids=[pid_a, pid_b])
+
+        payload = _make_webhook_payload("sauvage and eros price please")
+        response = client.post("/webhook", json=payload)
+        assert response.status_code == 200
+        mock_send.assert_called_once()
+        reply_text = mock_send.call_args[0][1]
+        assert PERFUMES[pid_a]["display_name"].upper() in reply_text
+        assert PERFUMES[pid_b]["display_name"].upper() in reply_text
+        assert reply_text.count("Prepaid only") == 1
+
+    @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
     def test_ambiguous_9pm_lists_all_real_candidates(self, mock_send, client):
-        """A bare '9pm' must get the rich comparison card (real perfume
-        names + prices), not the old content-free 'which one?' message."""
+        """A bare '9pm' must get a full price card for every real candidate
+        (name + prices), not the old content-free 'which one?' message.
+        Card headers are uppercased (see app.formatter._build_card_block)."""
         payload = _make_webhook_payload("9pm")
         response = client.post("/webhook", json=payload)
         assert response.status_code == 200
         reply_text = mock_send.call_args[0][1]
-        assert "Afnan 9PM Rebel" in reply_text
-        assert "Afnan 9PM Night Out" in reply_text
-        assert "Afnan 9PM Elixir Parfum" in reply_text
+        assert "AFNAN 9PM REBEL" in reply_text
+        assert "AFNAN 9PM NIGHT OUT" in reply_text
+        assert "AFNAN 9PM ELIXIR PARFUM" in reply_text
         assert "₹" in reply_text
 
 

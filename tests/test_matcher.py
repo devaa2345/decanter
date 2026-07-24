@@ -198,16 +198,22 @@ class TestNinePMFamilyAmbiguity:
 
 class TestAmbiguousKeywordCollisionCandidates:
     """
-    The "different keywords, similar length" branch of _layer1_exact_match
-    must also populate matched_perfume_ids — using a controlled synthetic
-    catalog (patched in) rather than hunting for a fragile real-world
-    example, since the exact catalog contents can change on re-upload.
+    When 2+ different keyword strings each match a different perfume, that
+    means the customer named multiple distinct products (e.g. "sauvage and
+    eros price") — _layer1_exact_match must return every one of them via
+    matched_perfume_ids so the reply can show a full card for each, rather
+    than silently keeping only the longest-keyword match and dropping the
+    rest (the real "shows one random perfume's detail" production bug) or
+    treating it as a vague "which one?" ambiguity. Uses a controlled
+    synthetic catalog (patched in) rather than hunting for a fragile
+    real-world example, since the exact catalog contents can change on
+    re-upload.
     """
 
     def test_tied_length_different_keywords_lists_both_candidates(self):
         # "crimson" and "emerald" are deliberately the same length (7 chars)
-        # — the ambiguous branch only triggers on a genuine tie; unequal
-        # lengths pick the longer/more-specific one instead (by design).
+        # — confirms the tied-length case also returns both, not just the
+        # unequal-length case covered below.
         synthetic = {
             "brandone_crimson": {
                 "display_name": "BrandOne Crimson",
@@ -229,6 +235,96 @@ class TestAmbiguousKeywordCollisionCandidates:
 
         assert result.ambiguous is True
         assert set(result.matched_perfume_ids) == {"brandone_crimson", "brandtwo_emerald"}
+
+    def test_unequal_length_different_keywords_still_lists_both(self):
+        """Regression guard for the actual reported production bug: the old
+        code picked ONLY the longer/more-specific keyword match and
+        silently dropped the other whenever the two matched keywords had
+        different lengths — so "sauvage and bleu de chanel" would keep
+        only "bleu de chanel" (14 chars) and drop "sauvage" (7 chars)
+        entirely. Different keyword strings for different products must
+        list both regardless of length difference."""
+        synthetic = {
+            "brandone_sauvage": {
+                "display_name": "BrandOne Sauvage",
+                "keywords": ["sauvage"],
+                "prices": {"3ml": 100},
+                "clone_of": None,
+            },
+            "brandtwo_bleudechanel": {
+                "display_name": "BrandTwo Bleu De Chanel",
+                "keywords": ["bleu de chanel"],
+                "prices": {"3ml": 100},
+                "clone_of": None,
+            },
+        }
+        with patch("app.matcher.PERFUMES", synthetic):
+            _keyword_boundary_regex.cache_clear()
+            result = _layer1_exact_match("sauvage 10ml and bleu de chanel 5ml please")
+            _keyword_boundary_regex.cache_clear()
+
+        assert result.perfume_id is None
+        assert set(result.matched_perfume_ids) == {"brandone_sauvage", "brandtwo_bleudechanel"}
+
+    def test_three_distinct_perfumes_all_listed(self):
+        synthetic = {
+            "brandone_crimson": {
+                "display_name": "BrandOne Crimson",
+                "keywords": ["crimson"],
+                "prices": {"3ml": 100},
+                "clone_of": None,
+            },
+            "brandtwo_emerald": {
+                "display_name": "BrandTwo Emerald",
+                "keywords": ["emerald"],
+                "prices": {"3ml": 100},
+                "clone_of": None,
+            },
+            "brandthree_topaz": {
+                "display_name": "BrandThree Topaz",
+                "keywords": ["topaz"],
+                "prices": {"3ml": 100},
+                "clone_of": None,
+            },
+        }
+        with patch("app.matcher.PERFUMES", synthetic):
+            _keyword_boundary_regex.cache_clear()
+            result = _layer1_exact_match("crimson emerald and topaz please")
+            _keyword_boundary_regex.cache_clear()
+
+        assert set(result.matched_perfume_ids) == {
+            "brandone_crimson",
+            "brandtwo_emerald",
+            "brandthree_topaz",
+        }
+
+    def test_same_shared_keyword_variant_collision_is_still_a_single_pick(self):
+        """A bare shared generic term matching several concentration
+        variants of ONE product line is still a single ambiguous item, not
+        a multi-perfume request — the customer named one thing, we're just
+        unsure which variant. Unaffected by the multi-perfume fix above."""
+        synthetic = {
+            "brand_sauvage_edt": {
+                "display_name": "Brand Sauvage EDT",
+                "keywords": ["sauvage"],
+                "prices": {"3ml": 100},
+                "clone_of": None,
+            },
+            "brand_sauvage_edp": {
+                "display_name": "Brand Sauvage EDP",
+                "keywords": ["sauvage"],
+                "prices": {"3ml": 120},
+                "clone_of": None,
+            },
+        }
+        with patch("app.matcher.PERFUMES", synthetic):
+            _keyword_boundary_regex.cache_clear()
+            result = _layer1_exact_match("sauvage price")
+            _keyword_boundary_regex.cache_clear()
+
+        assert result.ambiguous is False
+        assert result.perfume_id in synthetic
+        assert result.matched_perfume_ids is None
 
 
 class TestLayer2FuzzyMatch:
@@ -426,7 +522,7 @@ class TestPrimaryLLMMatch:
         # (correctly) get rejected by the "pid in candidates" check.
         async def fake_classify(message, candidates):
             return GroqClassification(
-                perfume_id=next(iter(candidates)), opening="Hi!", closing="Cool?"
+                perfume_ids=[next(iter(candidates))], opening="Hi!", closing="Cool?"
             )
 
         with patch(
@@ -441,6 +537,29 @@ class TestPrimaryLLMMatch:
         assert result.opening == "Hi!"
         assert result.closing == "Cool?"
 
+    def test_multiple_ids_return_a_multi_candidate_result(self):
+        """The core new behavior: Groq can identify 2+ distinct perfumes in
+        one message (e.g. "sauvage and eros price") — that must surface as
+        matched_perfume_ids, the same shape the fallback exact matcher uses
+        for its own multi-candidate case, so app.main can build a full card
+        for each regardless of which layer found them."""
+        async def fake_classify(message, candidates):
+            ids = list(candidates)[:2]
+            return GroqClassification(perfume_ids=ids, opening="Found a couple!", closing="Cool?")
+
+        with patch(
+            "app.groq_client.classify_and_phrase",
+            new_callable=AsyncMock,
+            side_effect=fake_classify,
+        ):
+            result = asyncio.run(_primary_llm_match("suvage 10ml"))
+        assert result.perfume_id is None
+        assert result.ambiguous is True
+        assert result.matched_perfume_ids is not None
+        assert len(result.matched_perfume_ids) == 2
+        assert result.layer == "llm"
+        assert result.opening == "Found a couple!"
+
     def test_empty_classification_returns_empty_result(self):
         with patch(
             "app.groq_client.classify_and_phrase",
@@ -449,13 +568,14 @@ class TestPrimaryLLMMatch:
         ):
             result = asyncio.run(_primary_llm_match("suvage 10ml"))
         assert result.perfume_id is None
+        assert result.matched_perfume_ids is None
 
     def test_id_outside_offered_candidates_is_rejected(self):
         """Defense in depth even though app.groq_client already validates
         this — a pid outside what was offered must never be trusted."""
         async def fake_classify(message, candidates):
             return GroqClassification(
-                perfume_id="totally_not_offered_xyz", opening="Hi", closing="Ok"
+                perfume_ids=["totally_not_offered_xyz"], opening="Hi", closing="Ok"
             )
 
         with patch(
@@ -465,6 +585,24 @@ class TestPrimaryLLMMatch:
         ):
             result = asyncio.run(_primary_llm_match("suvage 10ml"))
         assert result.perfume_id is None
+        assert result.matched_perfume_ids is None
+
+    def test_one_valid_one_invalid_id_keeps_only_the_valid_one(self):
+        async def fake_classify(message, candidates):
+            return GroqClassification(
+                perfume_ids=[next(iter(candidates)), "totally_not_offered_xyz"],
+                opening="Hi",
+                closing="Ok",
+            )
+
+        with patch(
+            "app.groq_client.classify_and_phrase",
+            new_callable=AsyncMock,
+            side_effect=fake_classify,
+        ):
+            result = asyncio.run(_primary_llm_match("suvage 10ml"))
+        assert result.perfume_id is not None
+        assert result.matched_perfume_ids is None
 
     def test_exception_returns_empty_result_not_raised(self):
         with patch(
@@ -488,7 +626,7 @@ class TestMatchPerfumeGroqFirstWithFallback:
     def test_confident_groq_match_is_used_directly(self):
         async def fake_classify(message, candidates):
             return GroqClassification(
-                perfume_id=next(iter(candidates)), opening="Hi!", closing="Cool?"
+                perfume_ids=[next(iter(candidates))], opening="Hi!", closing="Cool?"
             )
 
         with patch(
@@ -499,6 +637,24 @@ class TestMatchPerfumeGroqFirstWithFallback:
             result = asyncio.run(match_perfume("suvage 10ml"))
         assert result.layer == "llm"
         assert result.opening == "Hi!"
+
+    def test_groq_multi_match_is_used_directly_without_falling_through(self):
+        """A confident multi-perfume Groq result must short-circuit the
+        pipeline exactly like a single confident match does — it must not
+        fall through to the free matchers just because perfume_id (the
+        single-match field) is empty."""
+        async def fake_classify(message, candidates):
+            return GroqClassification(perfume_ids=list(candidates)[:2], opening="Found 2!")
+
+        with patch(
+            "app.groq_client.classify_and_phrase",
+            new_callable=AsyncMock,
+            side_effect=fake_classify,
+        ):
+            result = asyncio.run(match_perfume("suvage 10ml"))
+        assert result.layer == "llm"
+        assert result.matched_perfume_ids is not None
+        assert len(result.matched_perfume_ids) == 2
 
     def test_groq_failure_falls_through_to_exact_match(self):
         """A message that resolves fine via exact match must still work

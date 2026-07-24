@@ -22,6 +22,15 @@ time and always falling through to the free matcher. JSON mode
 (response_format={"type": "json_object"}) is an API-level guarantee of
 well-formed output, not a hope that a small/fast model follows a text
 convention.
+
+perfume_ids is a LIST, not a single id: confirmed in production that a
+customer message can clearly name multiple distinct perfumes at once (e.g.
+"sauvage and eros price"), and the old single-id shape silently dropped
+every match but the first. The old "none"/"ambiguous" literal markers are
+gone too — an empty list now means no match, and the existing
+not-in-candidates filtering handles any leftover legacy literal the model
+might still emit exactly like any other hallucinated id (see
+test_legacy_none_or_ambiguous_literal_treated_as_no_match).
 """
 
 import asyncio
@@ -37,10 +46,12 @@ from app.groq_client import GroqClassification, classify_and_phrase
 _REAL_PID = next(iter(PERFUMES))
 _REAL_DISPLAY_NAME = PERFUMES[_REAL_PID]["display_name"]
 _OTHER_PID = list(PERFUMES)[1]
+_THIRD_PID = list(PERFUMES)[2]
 
 CANDIDATES = {
     _REAL_PID: PERFUMES[_REAL_PID],
     _OTHER_PID: PERFUMES[_OTHER_PID],
+    _THIRD_PID: PERFUMES[_THIRD_PID],
 }
 
 
@@ -62,9 +73,13 @@ def _mock_openai_client(response=None, exception=None):
 
 
 def _json_response(
-    pid: str, opening: str = "Hey there!", closing: str = "Want me to set that aside?"
+    pids, opening: str = "Hey there!", closing: str = "Want me to set that aside?"
 ) -> str:
-    return json.dumps({"perfume_id": pid, "opening": opening, "closing": closing})
+    """pids: a single id string (wrapped into a 1-item list) or a list of
+    ids — matches the two shapes tests actually need to construct."""
+    if isinstance(pids, str):
+        pids = [pids]
+    return json.dumps({"perfume_ids": pids, "opening": opening, "closing": closing})
 
 
 @pytest.fixture(autouse=True)
@@ -86,13 +101,13 @@ class TestBuildSystemPrompt:
         prompt = groq_client._build_system_prompt(CANDIDATES)
         excluded_pid = next(p for p in PERFUMES if p not in CANDIDATES)
         assert excluded_pid not in prompt
-        # Sanity bound: two entries should produce a tiny prompt, nowhere
+        # Sanity bound: three entries should produce a tiny prompt, nowhere
         # near the ~23.5K-token full-catalog prompt that broke production.
-        assert len(prompt) < 2000
+        assert len(prompt) < 2500
 
     def test_forbids_prices_and_asterisks_in_instructions(self):
         """The prompt itself must tell the model never to write numbers or
-        asterisks — the two hard-learned production lessons this session."""
+        asterisks — two hard-learned production lessons this session."""
         prompt = groq_client._build_system_prompt(CANDIDATES)
         assert "price" in prompt.lower()
         assert "asterisk" in prompt.lower()
@@ -103,52 +118,81 @@ class TestBuildSystemPrompt:
         prompt = groq_client._build_system_prompt(CANDIDATES)
         assert "json" in prompt.lower()
 
+    def test_instructs_listing_every_clearly_named_perfume(self):
+        """The core new behavior: the prompt must tell the model to return
+        every distinct perfume it clearly identifies, not just one — this
+        is the actual fix for the "shows one random perfume's detail"
+        production bug."""
+        prompt = groq_client._build_system_prompt(CANDIDATES)
+        assert "perfume_ids" in prompt
+        assert "2+" in prompt or "multiple" in prompt.lower()
+
 
 class TestParseResponse:
     """_parse_response is the defensive-parsing boundary — malformed model
     output must degrade gracefully, never raise."""
 
-    def test_well_formed_json(self):
-        pid, opening, closing = groq_client._parse_response(_json_response(_REAL_PID))
-        assert pid == _REAL_PID
+    def test_well_formed_json_single_id(self):
+        pids, opening, closing = groq_client._parse_response(_json_response(_REAL_PID))
+        assert pids == [_REAL_PID]
         assert opening == "Hey there!"
         assert closing == "Want me to set that aside?"
 
+    def test_well_formed_json_multiple_ids(self):
+        pids, _, _ = groq_client._parse_response(_json_response([_REAL_PID, _OTHER_PID]))
+        assert pids == [_REAL_PID, _OTHER_PID]
+
     def test_case_normalized(self):
-        pid, _, _ = groq_client._parse_response(_json_response(_REAL_PID.upper()))
-        assert pid == _REAL_PID
+        pids, _, _ = groq_client._parse_response(_json_response(_REAL_PID.upper()))
+        assert pids == [_REAL_PID]
 
-    def test_missing_keys_return_none_for_those_fields(self):
-        pid, opening, closing = groq_client._parse_response(json.dumps({"perfume_id": _REAL_PID}))
-        assert pid == _REAL_PID
-        assert opening is None
-        assert closing is None
-
-    def test_empty_string_fields_treated_as_none(self):
-        """The prompt asks for closing="" when unmatched — must not surface
-        as a literal empty-string closing line in a reply."""
-        pid, opening, closing = groq_client._parse_response(
-            json.dumps({"perfume_id": "none", "opening": "Not sure!", "closing": ""})
+    def test_duplicate_ids_deduplicated_preserving_order(self):
+        pids, _, _ = groq_client._parse_response(
+            _json_response([_REAL_PID, _OTHER_PID, _REAL_PID])
         )
-        assert closing is None
+        assert pids == [_REAL_PID, _OTHER_PID]
 
-    def test_invalid_json_returns_all_none(self):
-        pid, opening, closing = groq_client._parse_response("uh, what?")
-        assert pid is None
-        assert opening is None
-        assert closing is None
+    def test_missing_perfume_ids_key_returns_empty_list(self):
+        pids, opening, _ = groq_client._parse_response(json.dumps({"opening": "Hi"}))
+        assert pids == []
+        assert opening == "Hi"
 
-    def test_json_array_instead_of_object_returns_all_none(self):
-        pid, opening, closing = groq_client._parse_response(json.dumps(["not", "an", "object"]))
-        assert pid is None
-        assert opening is None
-        assert closing is None
+    def test_perfume_ids_not_a_list_returns_empty_list(self):
+        pids, _, _ = groq_client._parse_response(json.dumps({"perfume_ids": _REAL_PID}))
+        assert pids == []
 
-    def test_non_string_field_values_ignored_gracefully(self):
-        pid, opening, closing = groq_client._parse_response(
-            json.dumps({"perfume_id": 12345, "opening": None, "closing": ["a", "list"]})
+    def test_non_string_entries_in_list_are_skipped(self):
+        pids, _, _ = groq_client._parse_response(
+            json.dumps({"perfume_ids": [_REAL_PID, 123, None, _OTHER_PID]})
         )
-        assert pid is None
+        assert pids == [_REAL_PID, _OTHER_PID]
+
+    def test_empty_list_returns_empty_list(self):
+        pids, _, closing = groq_client._parse_response(
+            json.dumps({"perfume_ids": [], "opening": "Not sure!", "closing": ""})
+        )
+        assert pids == []
+        # The prompt asks for closing="" when unmatched — must not surface
+        # as a literal empty-string closing line in a reply.
+        assert closing is None
+
+    def test_invalid_json_returns_all_empty(self):
+        pids, opening, closing = groq_client._parse_response("uh, what?")
+        assert pids == []
+        assert opening is None
+        assert closing is None
+
+    def test_json_array_instead_of_object_returns_all_empty(self):
+        pids, opening, closing = groq_client._parse_response(json.dumps(["not", "an", "object"]))
+        assert pids == []
+        assert opening is None
+        assert closing is None
+
+    def test_non_string_opening_closing_ignored_gracefully(self):
+        pids, opening, closing = groq_client._parse_response(
+            json.dumps({"perfume_ids": [_REAL_PID], "opening": None, "closing": ["a", "list"]})
+        )
+        assert pids == [_REAL_PID]
         assert opening is None
         assert closing is None
 
@@ -157,9 +201,9 @@ class TestParseResponse:
         let the model emit 'id: name' instead of a proper label — JSON mode
         structurally can't produce that shape at all, so there's nothing
         equivalent to test here except confirming plain non-JSON text is
-        rejected cleanly (covered by test_invalid_json_returns_all_none)."""
-        pid, _, _ = groq_client._parse_response("dior_sauvage_edt: Dior Sauvage EDT")
-        assert pid is None
+        rejected cleanly (covered by test_invalid_json_returns_all_empty)."""
+        pids, _, _ = groq_client._parse_response("dior_sauvage_edt: Dior Sauvage EDT")
+        assert pids == []
 
 
 class TestClassifyAndPhrase:
@@ -168,46 +212,70 @@ class TestClassifyAndPhrase:
         with patch("app.groq_client.AsyncOpenAI", return_value=fake):
             result = asyncio.run(classify_and_phrase("some message", candidates=CANDIDATES))
         assert result == GroqClassification(
-            perfume_id=_REAL_PID, opening="Hey there!", closing="Want me to set that aside?"
+            perfume_ids=[_REAL_PID], opening="Hey there!", closing="Want me to set that aside?"
         )
 
-    def test_none_literal_returns_empty_classification(self):
+    def test_multiple_distinct_perfumes_are_all_returned(self):
+        """The core new behavior this file exists to cover: a message that
+        clearly names 2+ different perfumes must surface ALL of them, not
+        just the first — the old single-id shape had no way to do this and
+        silently dropped every match but one."""
         fake, _ = _mock_openai_client(
-            response=_mock_response(_json_response("none", opening="Not sure which one!", closing=""))
+            response=_mock_response(_json_response([_REAL_PID, _OTHER_PID]))
+        )
+        with patch("app.groq_client.AsyncOpenAI", return_value=fake):
+            result = asyncio.run(
+                classify_and_phrase("sauvage and eros price", candidates=CANDIDATES)
+            )
+        assert result.perfume_ids == [_REAL_PID, _OTHER_PID]
+
+    def test_empty_list_returns_empty_classification(self):
+        fake, _ = _mock_openai_client(
+            response=_mock_response(_json_response([], opening="Not sure which one!", closing=""))
         )
         with patch("app.groq_client.AsyncOpenAI", return_value=fake):
             result = asyncio.run(classify_and_phrase("hello there", candidates=CANDIDATES))
         assert result == GroqClassification()
 
-    def test_ambiguous_literal_returns_empty_classification(self):
-        """"ambiguous" falls through to the free matcher (which has its own
-        real candidate-listing logic) rather than Groq guessing between
-        genuinely different products."""
-        fake, _ = _mock_openai_client(
-            response=_mock_response(
-                _json_response("ambiguous", opening="A couple could match!", closing="")
-            )
-        )
-        with patch("app.groq_client.AsyncOpenAI", return_value=fake):
-            result = asyncio.run(classify_and_phrase("9pm", candidates=CANDIDATES))
-        assert result.perfume_id is None
+    def test_legacy_none_or_ambiguous_literal_treated_as_no_match(self):
+        """The old prompt asked for a literal "none"/"ambiguous" string in
+        place of a real id; even if the model still emits one of those
+        (imperfect prompt compliance during the migration), it isn't a
+        real candidate id, so the normal not-in-candidates filtering
+        discards it exactly like any other hallucinated id — no
+        special-casing needed."""
+        for literal in ("none", "ambiguous"):
+            fake, _ = _mock_openai_client(response=_mock_response(_json_response(literal)))
+            with patch("app.groq_client.AsyncOpenAI", return_value=fake):
+                result = asyncio.run(classify_and_phrase("hello there", candidates=CANDIDATES))
+            assert result == GroqClassification()
 
-    def test_id_not_in_candidates_is_rejected(self):
+    def test_ids_not_in_candidates_are_filtered_out(self):
         """Defensive validation: even if the LLM hallucinates a plausible-
         looking id, only ids we actually offered it are trusted — including
-        real catalog ids that just weren't in THIS shortlist."""
+        real catalog ids that just weren't in THIS shortlist. A response
+        with one valid and one invalid id keeps only the valid one."""
+        excluded_pid = next(p for p in PERFUMES if p not in CANDIDATES)
+        fake, _ = _mock_openai_client(
+            response=_mock_response(_json_response([_REAL_PID, excluded_pid]))
+        )
+        with patch("app.groq_client.AsyncOpenAI", return_value=fake):
+            result = asyncio.run(classify_and_phrase("some message", candidates=CANDIDATES))
+        assert result.perfume_ids == [_REAL_PID]
+
+    def test_all_ids_invalid_returns_empty_classification(self):
         excluded_pid = next(p for p in PERFUMES if p not in CANDIDATES)
         fake, _ = _mock_openai_client(response=_mock_response(_json_response(excluded_pid)))
         with patch("app.groq_client.AsyncOpenAI", return_value=fake):
             result = asyncio.run(classify_and_phrase("some message", candidates=CANDIDATES))
-        assert result.perfume_id is None
+        assert result == GroqClassification()
 
     def test_hedging_opening_on_a_confident_match_is_discarded(self):
         """Confirmed directly against the real model: it sometimes returns
         a specific perfume_id but still writes a hedging opening ("We have
         several options, can you give me a hint?") despite the prompt rule
         against it. That reads as contradictory next to a confident price
-        card, so it must be discarded — perfume_id/closing stay intact,
+        card, so it must be discarded — perfume_ids/closing stay intact,
         only the bad opening is dropped."""
         fake, _ = _mock_openai_client(
             response=_mock_response(
@@ -220,7 +288,7 @@ class TestClassifyAndPhrase:
         )
         with patch("app.groq_client.AsyncOpenAI", return_value=fake):
             result = asyncio.run(classify_and_phrase("some message", candidates=CANDIDATES))
-        assert result.perfume_id == _REAL_PID
+        assert result.perfume_ids == [_REAL_PID]
         assert result.opening is None
         assert result.closing == "Happy to help!"
 
@@ -237,7 +305,7 @@ class TestClassifyAndPhrase:
         caller falls through to the free matcher entirely in that case, so
         there's no mismatched 'friendly text + wrong/no card' combination."""
         fake, _ = _mock_openai_client(
-            response=_mock_response(_json_response("none", opening="Hmm not sure!", closing=""))
+            response=_mock_response(_json_response([], opening="Hmm not sure!", closing=""))
         )
         with patch("app.groq_client.AsyncOpenAI", return_value=fake):
             result = asyncio.run(classify_and_phrase("some message", candidates=CANDIDATES))
@@ -279,7 +347,7 @@ class TestClassifyAndPhrase:
         create.assert_not_called()
 
     def test_sends_message_as_user_content(self):
-        fake, create = _mock_openai_client(response=_mock_response(_json_response("none")))
+        fake, create = _mock_openai_client(response=_mock_response(_json_response([])))
         with patch("app.groq_client.AsyncOpenAI", return_value=fake):
             asyncio.run(classify_and_phrase("how much for sauvage", candidates=CANDIDATES))
 
@@ -288,7 +356,7 @@ class TestClassifyAndPhrase:
         assert messages[-1] == {"role": "user", "content": "how much for sauvage"}
 
     def test_uses_the_specified_fast_model(self):
-        fake, create = _mock_openai_client(response=_mock_response(_json_response("none")))
+        fake, create = _mock_openai_client(response=_mock_response(_json_response([])))
         with patch("app.groq_client.AsyncOpenAI", return_value=fake):
             asyncio.run(classify_and_phrase("some message", candidates=CANDIDATES))
 
@@ -298,7 +366,7 @@ class TestClassifyAndPhrase:
     def test_requests_json_mode(self):
         """The actual fix: the API call must request json_object mode, not
         just hope the model follows a text convention."""
-        fake, create = _mock_openai_client(response=_mock_response(_json_response("none")))
+        fake, create = _mock_openai_client(response=_mock_response(_json_response([])))
         with patch("app.groq_client.AsyncOpenAI", return_value=fake):
             asyncio.run(classify_and_phrase("some message", candidates=CANDIDATES))
 
@@ -308,7 +376,7 @@ class TestClassifyAndPhrase:
     def test_prompt_sent_is_scoped_to_candidates(self):
         """End-to-end check that the actual API call carries the scoped
         prompt, not the module reaching back into the full catalog."""
-        fake, create = _mock_openai_client(response=_mock_response(_json_response("none")))
+        fake, create = _mock_openai_client(response=_mock_response(_json_response([])))
         with patch("app.groq_client.AsyncOpenAI", return_value=fake):
             asyncio.run(classify_and_phrase("some message", candidates=CANDIDATES))
 

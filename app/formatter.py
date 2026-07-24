@@ -43,10 +43,11 @@ ORDER_CONFIRMATION_MESSAGE = "Thank you for confirming your order! We will conta
 
 WILL_CONTACT_LINE = "We'll contact you shortly!"
 
-# Safety cap on how many candidates an ambiguous-match card lists — the
-# known cases (the "9pm" family, a catalog keyword collision) are always a
-# handful, but this guards against ever dumping an unreadably long list.
-_MAX_AMBIGUOUS_CANDIDATES = 8
+# Safety cap on how many perfumes a multi-perfume reply shows full cards
+# for — the known cases (the "9pm" family, a catalog keyword collision, a
+# customer naming a few products at once) are always a handful, but this
+# guards against ever dumping an unreadably long message.
+_MAX_MULTI_CANDIDATES = 8
 
 
 def _format_price(price: int) -> str:
@@ -63,75 +64,26 @@ def _price_range(prices: dict) -> str:
     return _format_price(lo) if lo == hi else f"{_format_price(lo)} - {_format_price(hi)}"
 
 
-def build_ambiguous_card(perfume_ids: list[str] | None) -> str:
+def _build_card_block(perfume: dict) -> list[str]:
     """
-    List every genuinely ambiguous candidate (name + price range) instead of
-    just asking "which one?" with no information to go on. Falls back to
-    the plain AMBIGUOUS_MESSAGE if no candidate list was supplied (should
-    only happen for a matcher path that hasn't been taught to populate
-    matched_perfume_ids yet — never a hard failure).
+    Name header + price grid lines for one perfume — no opening/closing/
+    shipping card, just the self-contained visual block. Shared by
+    build_price_card (one perfume) and build_multi_price_card (2+
+    perfumes, which shows one of these per perfume but only ONE shared
+    shipping card at the end instead of repeating it per item).
+
+    No asterisks anywhere (see module docstring) and no leading emoji (🌸
+    was one of the things suspected before "*" was isolated as the actual
+    cause; left plain since only 📋/🙂 are individually confirmed safe and
+    neither fits this context). Uppercase name + a plain "-" divider
+    (confirmed safe) fakes emphasis without any markdown Chat Mitra might
+    reject.
     """
-    if not perfume_ids:
-        return AMBIGUOUS_MESSAGE
-
-    shown = perfume_ids[:_MAX_AMBIGUOUS_CANDIDATES]
-    lines = ["I found more than one perfume in your message:", ""]
-
-    for i, pid in enumerate(shown, start=1):
-        perfume = PERFUMES.get(pid)
-        if not perfume:
-            continue
-        lines.append(f"{i}. {perfume['display_name']} - {_price_range(perfume.get('prices', {}))}")
-
-    remaining = len(perfume_ids) - len(shown)
-    if remaining > 0:
-        lines.append(f"...and {remaining} more")
-
-    lines.append("")
-    lines.append("Please reply with the exact name of the one you'd like!")
-
-    return "\n".join(lines)
-
-
-def build_price_card(
-    perfume_id: str,
-    opening: str | None = None,
-    closing: str | None = None,
-) -> str:
-    """
-    Build the full reply message for a matched perfume.
-
-    Returns the price card + shipping card as a single string.
-    Always shows all available size tiers (never just one size).
-
-    opening/closing (from Groq's classify_and_phrase — see app.matcher)
-    wrap the card with short, natural, personalized phrasing when
-    available. The name header, price grid, and shipping card underneath
-    are always the exact same deterministic text either way — Groq never
-    touches a price, only what surrounds it. Without them (Groq
-    unavailable, or the free fallback matcher resolved it instead), this
-    renders with the same plain header/closing it always has.
-    """
-    perfume = PERFUMES.get(perfume_id)
-    if not perfume:
-        return FALLBACK_MESSAGE
-
     prices = perfume["prices"]
     display_name = perfume["display_name"]
 
-    # Build the card header — no asterisks (see module docstring) and no
-    # leading emoji (🌸 was one of the things suspected before "*" was
-    # isolated as the actual cause; left plain since only 📋/🙂 are
-    # individually confirmed safe and neither fits this context). Uppercase
-    # name + a plain "-" divider (confirmed safe) fakes emphasis without
-    # any markdown Chat Mitra might reject.
     divider = "-" * min(max(len(display_name), 12), 32)
-    lines = []
-    if opening:
-        lines.append(opening)
-        lines.append("")
-    lines.append(display_name.upper())
-    lines.append(divider)
+    lines = [display_name.upper(), divider]
 
     # Define the standard decant tiers and full bottle tier
     decant_sizes = ["3ml", "5ml", "8ml", "10ml", "20ml", "30ml"]
@@ -171,9 +123,87 @@ def build_price_card(
             else:
                 lines.append(f"Full bottle  {_format_price(prices[size_key])}")
 
-    # Closing divider + shipping card + contact-you line (Groq's closing
-    # phrasing if we have it, else the plain deterministic default)
     lines.append(divider)
+    return lines
+
+
+def build_price_card(
+    perfume_id: str,
+    opening: str | None = None,
+    closing: str | None = None,
+) -> str:
+    """
+    Build the full reply message for a single matched perfume.
+
+    Returns the price card + shipping card as a single string.
+    Always shows all available size tiers (never just one size).
+
+    opening/closing (from Groq's classify_and_phrase — see app.matcher)
+    wrap the card with short, natural, personalized phrasing when
+    available. The name header, price grid, and shipping card underneath
+    are always the exact same deterministic text either way — Groq never
+    touches a price, only what surrounds it. Without them (Groq
+    unavailable, or the free fallback matcher resolved it instead), this
+    renders with the same plain header/closing it always has.
+    """
+    perfume = PERFUMES.get(perfume_id)
+    if not perfume:
+        return FALLBACK_MESSAGE
+
+    lines = []
+    if opening:
+        lines.append(opening)
+        lines.append("")
+    lines.extend(_build_card_block(perfume))
+    lines.append(SHIPPING_CARD)
+    lines.append("")
+    lines.append(closing or WILL_CONTACT_LINE)
+
+    return "\n".join(lines)
+
+
+def build_multi_price_card(
+    perfume_ids: list[str] | None,
+    opening: str | None = None,
+    closing: str | None = None,
+) -> str:
+    """
+    Full price card for EACH of 2+ perfumes found in one message — used
+    both when the customer clearly named multiple distinct products (e.g.
+    "sauvage and eros price") and when a single mention was ambiguous among
+    close variants (e.g. bare "9pm" matching 4 real products). Either way,
+    confirmed in production that customers want to actually see the real
+    candidates with their prices, not just a random single guess or a
+    content-free "which one?" prompt.
+
+    Capped at _MAX_MULTI_CANDIDATES so a wide keyword collision can't
+    produce an unreadably long message. Falls back to AMBIGUOUS_MESSAGE if
+    no usable candidate list was supplied.
+    """
+    if not perfume_ids:
+        return AMBIGUOUS_MESSAGE
+
+    shown = perfume_ids[:_MAX_MULTI_CANDIDATES]
+    perfumes = [PERFUMES[pid] for pid in shown if pid in PERFUMES]
+    if not perfumes:
+        return AMBIGUOUS_MESSAGE
+
+    lines = []
+    if opening:
+        lines.append(opening)
+        lines.append("")
+
+    for i, perfume in enumerate(perfumes):
+        if i > 0:
+            lines.append("")
+        lines.extend(_build_card_block(perfume))
+
+    remaining = len(perfume_ids) - len(shown)
+    if remaining > 0:
+        lines.append("")
+        lines.append(f"...and {remaining} more match your message - tell me the exact name for its price too!")
+
+    lines.append("")
     lines.append(SHIPPING_CARD)
     lines.append("")
     lines.append(closing or WILL_CONTACT_LINE)

@@ -24,7 +24,7 @@ from app.formatter import (
     FALLBACK_MESSAGE,
     NON_TEXT_MESSAGE,
     ORDER_CONFIRMATION_MESSAGE,
-    build_ambiguous_card,
+    build_multi_price_card,
     build_price_card,
 )
 from app.greeting import is_greeting_or_catalog_request
@@ -303,8 +303,14 @@ async def webhook_handler(request: Request):
     # ask or an actual perfume match gets a reply; anything else stays
     # silent — but is still logged below so the "catalog gaps" dashboard
     # still sees what customers asked that the bot didn't answer.
-    if result.ambiguous:
-        reply_text = build_ambiguous_card(result.matched_perfume_ids)
+    #
+    # matched_perfume_ids (2+ perfumes) takes priority over the ambiguous
+    # flag alone: it's populated whenever the customer's message resolved
+    # to multiple real candidates — whether they clearly named several
+    # distinct products or a single mention was ambiguous among close
+    # variants — and either way the reply shows a full card for each.
+    if result.matched_perfume_ids:
+        reply_text = build_multi_price_card(result.matched_perfume_ids, result.opening, result.closing)
     elif result.perfume_id:
         reply_text = build_price_card(result.perfume_id, result.opening, result.closing)
     elif is_greeting_or_catalog_request(message_text):
