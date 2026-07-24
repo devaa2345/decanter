@@ -307,16 +307,18 @@ class TestWebhookHandler:
         """The reported production bug: a customer mentioning a perfume
         name mid-conversation (e.g. talking to the shop owner about
         something else) must not auto-fire a price card — only an
-        explicit ask should. classify_and_phrase is mocked to return an
-        empty classification here (standing in for either a real Groq
-        outage or Groq's own explicit_ask=false judgment collapsing to the
-        same empty result — see app.groq_client), which exercises the
-        deterministic fallback layer's own explicit-request gate end to
-        end through the real webhook handler."""
+        explicit ask should. classify_and_phrase is mocked to return None
+        here (a genuine Groq outage — see app.groq_client's None-vs-empty
+        distinction), which exercises the deterministic fallback layer's
+        own explicit-request gate end to end through the real webhook
+        handler. A successful Groq call would instead be trusted directly
+        without ever reaching this fallback — see
+        test_groq_confident_no_match_stays_silent_without_deterministic_fallback
+        below for that path."""
         with patch(
             "app.groq_client.classify_and_phrase",
             new_callable=AsyncMock,
-            return_value=GroqClassification(),
+            return_value=None,
         ):
             payload = _make_webhook_payload(
                 "the owner told me sauvage is really nice apparently"
@@ -333,12 +335,13 @@ class TestWebhookHandler:
         the negation), but the deterministic fallback's keyword-plus-cue
         heuristic matched "rebel" and then mis-fired on "want" inside
         "don't want" with no negation awareness. classify_and_phrase is
-        mocked empty here (standing in for Groq being unavailable) to
-        exercise the fallback's own negation guard end to end."""
+        mocked to return None here (a genuine Groq outage) to exercise the
+        fallback's own negation guard end to end — a successful Groq call
+        would instead be trusted directly and never reach this fallback."""
         with patch(
             "app.groq_client.classify_and_phrase",
             new_callable=AsyncMock,
-            return_value=GroqClassification(),
+            return_value=None,
         ):
             payload = _make_webhook_payload(
                 "the 9 pm rebel is really good but i don't want ut"
@@ -346,6 +349,30 @@ class TestWebhookHandler:
             response = client.post("/webhook", json=payload)
         assert response.status_code == 200
         mock_send.assert_not_called()
+
+    @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
+    def test_kaaf_only_no_longer_over_matches(self, mock_send, client):
+        """The exact real production bug reported live: 'I want to confirm
+        kaaf only' got a price card for Kaaf AND an unrelated 'Afnan
+        Supremacy Not Only Intense(SNOI)', because "only" happened to be a
+        standalone auto-generated keyword for that product with no
+        connection to what the customer asked. Fixed at the root via
+        GENERIC_STOPWORDS (app.matcher), not by disabling the deterministic
+        fallback — classify_and_phrase returning an empty (not None)
+        GroqClassification here simulates Groq having genuinely run and
+        found this unconfident, so the deterministic layer is what's
+        actually under test."""
+        with patch(
+            "app.groq_client.classify_and_phrase",
+            new_callable=AsyncMock,
+            return_value=GroqClassification(),
+        ):
+            payload = _make_webhook_payload("I want to confirm kaaf only")
+            response = client.post("/webhook", json=payload)
+        assert response.status_code == 200
+        reply_text = mock_send.call_args[0][1]
+        assert "KAAF" in reply_text.upper()
+        assert "NOT ONLY INTENSE" not in reply_text.upper()
 
     @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
     def test_ambiguous_9pm_lists_all_real_candidates(self, mock_send, client):

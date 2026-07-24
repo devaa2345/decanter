@@ -3,11 +3,29 @@ Perfume matching pipeline — Groq LLM first, deterministic fallback.
 
 Primary: Groq LLM classification + reply phrasing (llama-3.1-8b-instant —
 paid, but fast; ~few hundred ms typical). Tried first for every message.
-Fallback (only on Groq error/timeout/no-confident-match/ambiguous), same
-order as before this became LLM-first:
+Fallback (whenever Groq didn't return a confident match — genuinely
+unreachable, or ran fine but wasn't confident enough on its own; see
+result.llm_unavailable and match_perfume's docstring for why BOTH cases
+fall through), same order as before this became LLM-first:
   1. Normalize + exact/substring keyword match (free, instant)
   2. Fuzzy string match via rapidfuzz (free, fast)
-This means the bot never goes fully silent on a Groq outage or rate limit.
+This means the bot never goes fully silent on a Groq outage, rate limit,
+or a case Groq itself hedges on (e.g. a genuinely ambiguous bare "9pm" —
+Groq reliably returns one low-confidence guess for this rather than
+confidently listing all 4 real candidates, so trusting its "no" as final
+would go silent instead of showing the family the customer likely meant).
+
+app.groq_client.classify_and_phrase distinguishes None (Groq itself
+couldn't be asked — no key, no candidates, API error) from an empty
+GroqClassification() (Groq ran fine, found nothing confident) purely for
+logging/diagnostics — see MatchResult.llm_unavailable — but match_perfume
+treats both the same way for routing: fall through to the deterministic
+layers either way. A real production bug is why the deterministic layers'
+own precision matters here rather than trying to gate them out entirely:
+"I want to confirm kaaf only" additionally matched an unrelated "Not Only
+Intense" product purely because "only" happened to be a standalone
+keyword for it — fixed at the root via GENERIC_STOPWORDS below, not by
+refusing to ever run the fallback.
 
 A perfume name found by ANY layer only becomes a real match if the message
 also looks like an explicit request, not just a mention. Confirmed in
@@ -58,6 +76,12 @@ class MatchResult:
     # app.groq_client) — those always come from catalog.py.
     opening: str | None = None
     closing: str | None = None
+    # True only when Groq itself couldn't be reached at all (see
+    # app.groq_client.classify_and_phrase's None return) rather than a
+    # successful call that simply found nothing confident — kept purely
+    # for logging/diagnostics; match_perfume falls through to the
+    # deterministic layers in both cases either way (see its docstring).
+    llm_unavailable: bool = False
 
 
 # Common English words that appear as catalog keywords but are too
@@ -66,14 +90,18 @@ class MatchResult:
 # matches "Mark & Victor Eau De Flora" (which has "order" as a keyword).
 # Multi-word keywords containing these words (e.g. "sunday morning",
 # "night out") still work fine — only single-word keywords are skipped.
+# "only"/"most"/"never"/"when" confirmed live: "I want to confirm kaaf
+# only" additionally matched "Afnan Supremacy Not Only Intense(SNOI)"
+# purely because "only" is a standalone auto-generated keyword for that
+# product — nothing to do with what the customer actually asked about.
 GENERIC_STOPWORDS: set[str] = {
     "amount", "best", "blue", "day", "de", "eau", "flora", "good",
     "hello", "home", "just", "king", "know", "last", "lazy", "light",
-    "long", "love", "man", "mark", "morning", "night", "note", "old",
-    "one", "open", "order", "play", "pure", "rain", "red", "rich",
-    "rose", "royal", "rush", "show", "silk", "star", "story", "sunday",
-    "that", "the", "this", "touch", "tree", "very", "want", "warm",
-    "what", "wild", "wood", "your",
+    "long", "love", "man", "mark", "morning", "most", "never", "night",
+    "note", "old", "one", "only", "open", "order", "play", "pure",
+    "rain", "red", "rich", "rose", "royal", "rush", "show", "silk",
+    "star", "story", "sunday", "that", "the", "this", "touch", "tree",
+    "very", "want", "warm", "what", "when", "wild", "wood", "your",
 }
 
 # Family/series terms that are genuinely ambiguous when mentioned alone,
@@ -432,47 +460,81 @@ async def _primary_llm_match(normalized: str) -> MatchResult:
     perfumes — that's surfaced the same way the fallback exact matcher
     surfaces it (matched_perfume_ids, ambiguous=True), so app.main builds a
     full price card for each regardless of which layer found them.
+
+    Sets llm_unavailable=True only when Groq itself could not be asked at
+    all (classify_and_phrase returned None, or raised) — purely for
+    logging/diagnostics (see the module docstring); match_perfume falls
+    through to the deterministic layers either way, since a successful-but-
+    empty call is treated the same as an outage for routing purposes.
     """
     from app.groq_client import classify_and_phrase
 
     candidates = _top_candidates_for_llm(normalized)
     if not candidates:
+        # Nothing plausible enough to even offer Groq — the deterministic
+        # layers below use the same underlying fuzzy scoring, so they
+        # wouldn't find anything either. Not an outage, just genuinely
+        # nothing here; stays silent rather than falling through.
         return MatchResult()
 
     try:
         result = await classify_and_phrase(normalized, candidates=candidates)
-        # Defense in depth even though app.groq_client already validates
-        # this — an id outside what was offered must never be trusted.
-        valid_pids = [pid for pid in result.perfume_ids if pid in candidates]
-
-        if len(valid_pids) == 1:
-            return MatchResult(
-                perfume_id=valid_pids[0],
-                layer="llm",
-                confidence=80.0,
-                opening=result.opening,
-                closing=result.closing,
-            )
-        if len(valid_pids) > 1:
-            return MatchResult(
-                ambiguous=True,
-                matched_perfume_ids=valid_pids,
-                layer="llm",
-                confidence=80.0,
-                opening=result.opening,
-                closing=result.closing,
-            )
     except Exception:
         logger.exception("Primary LLM classification failed")
+        return MatchResult(llm_unavailable=True)
 
+    if result is None:
+        return MatchResult(llm_unavailable=True)
+
+    # Defense in depth even though app.groq_client already validates this —
+    # an id outside what was offered must never be trusted.
+    valid_pids = [pid for pid in result.perfume_ids if pid in candidates]
+
+    if len(valid_pids) == 1:
+        return MatchResult(
+            perfume_id=valid_pids[0],
+            layer="llm",
+            confidence=80.0,
+            opening=result.opening,
+            closing=result.closing,
+        )
+    if len(valid_pids) > 1:
+        return MatchResult(
+            ambiguous=True,
+            matched_perfume_ids=valid_pids,
+            layer="llm",
+            confidence=80.0,
+            opening=result.opening,
+            closing=result.closing,
+        )
+
+    # Groq successfully ran and found nothing confident/explicit —
+    # llm_unavailable stays False; match_perfume still falls through to the
+    # deterministic layers from here (see its docstring for why).
     return MatchResult()
 
 
 async def match_perfume(message_text: str) -> MatchResult:
     """
     Run the matching pipeline: Groq LLM first (primary), falling through to
-    the free exact/fuzzy matchers only if Groq errors, times out, or isn't
-    confident — so the bot never goes silent on a Groq outage or rate limit.
+    the free exact/fuzzy matchers whenever Groq didn't return a confident
+    match — whether because it was genuinely unreachable (see
+    result.llm_unavailable, logged but not gated on: see below) or because
+    it successfully ran but wasn't confident/explicit enough on its own.
+
+    Deliberately NOT gated on llm_unavailable alone — an earlier version of
+    this fix tried trusting Groq's "no" as final and skipping the
+    deterministic layers entirely whenever Groq successfully ran, but that
+    regressed a real, valuable existing behavior: a bare "9pm" is
+    genuinely ambiguous among 4 real product variants, and Groq reliably
+    hedges on this with a single low-confidence guess (explicit_ask=false)
+    rather than confidently listing all 4 candidates as the prompt asks —
+    trusting that "no" outright would have gone silent instead of showing
+    the full family the customer likely meant. The deterministic layers
+    are safe to keep running unconditionally now that their real precision
+    gaps are fixed at the root (see GENERIC_STOPWORDS and
+    _looks_like_explicit_request's negation guard below) rather than by
+    refusing to run them at all.
 
     Returns a MatchResult indicating the match (or lack thereof).
     """
@@ -490,6 +552,12 @@ async def match_perfume(message_text: str) -> MatchResult:
             result.matched_perfume_ids,
         )
         return result
+
+    logger.info(
+        "No confident primary match (llm_unavailable=%s) for message: %s",
+        result.llm_unavailable,
+        message_text[:100],
+    )
 
     # Fallback: exact/substring match — gated by _looks_like_explicit_request
     # (see module docstring): a keyword found inside a long message with no

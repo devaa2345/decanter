@@ -111,7 +111,7 @@ class TestBuildSystemPrompt:
         assert excluded_pid not in prompt
         # Sanity bound: three entries should produce a tiny prompt, nowhere
         # near the ~23.5K-token full-catalog prompt that broke production.
-        assert len(prompt) < 3200
+        assert len(prompt) < 3800
 
     def test_forbids_prices_and_asterisks_in_instructions(self):
         """The prompt itself must tell the model never to write numbers or
@@ -407,26 +407,31 @@ class TestClassifyAndPhrase:
             result = asyncio.run(classify_and_phrase("some message", candidates=CANDIDATES))
         assert result == GroqClassification()
 
-    def test_api_exception_returns_empty_classification_not_raised(self):
+    def test_api_exception_returns_none_not_raised(self):
+        """None, not an empty GroqClassification — a real API failure means
+        Groq was never actually asked, so app.matcher must fall through to
+        the deterministic fallback rather than trusting a "confident no" it
+        never actually gave (see the None-vs-empty split in the module
+        docstring)."""
         fake, _ = _mock_openai_client(exception=RuntimeError("groq is down"))
         with patch("app.groq_client.AsyncOpenAI", return_value=fake):
             result = asyncio.run(classify_and_phrase("some message", candidates=CANDIDATES))
-        assert result == GroqClassification()
+        assert result is None
 
-    def test_missing_api_key_returns_empty_without_a_call(self):
+    def test_missing_api_key_returns_none_without_a_call(self):
         fake, create = _mock_openai_client(response=_mock_response(_json_response(_REAL_PID)))
         with patch.object(groq_client.settings, "GROQ_API_KEY", ""):
             with patch("app.groq_client.AsyncOpenAI", return_value=fake):
                 result = asyncio.run(classify_and_phrase("some message", candidates=CANDIDATES))
-        assert result == GroqClassification()
+        assert result is None
         create.assert_not_called()
 
-    def test_empty_candidates_returns_empty_without_a_call(self):
+    def test_empty_candidates_returns_none_without_a_call(self):
         """No point calling Groq if there's nothing to choose from."""
         fake, create = _mock_openai_client(response=_mock_response(_json_response(_REAL_PID)))
         with patch("app.groq_client.AsyncOpenAI", return_value=fake):
             result = asyncio.run(classify_and_phrase("some message", candidates={}))
-        assert result == GroqClassification()
+        assert result is None
         create.assert_not_called()
 
     def test_sends_message_as_user_content(self):

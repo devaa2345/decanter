@@ -646,6 +646,36 @@ class TestPrimaryLLMMatch:
         ):
             result = asyncio.run(_primary_llm_match("suvage 10ml"))
         assert result.perfume_id is None
+        assert result.llm_unavailable is True
+
+    def test_none_result_marks_llm_unavailable(self):
+        """classify_and_phrase returning None (its documented signal for
+        "Groq itself couldn't be reached") must be distinguished from a
+        successful call that confidently found nothing — only the former
+        sets llm_unavailable, which is what tells match_perfume it's safe
+        (and necessary) to fall through to the deterministic layers."""
+        with patch(
+            "app.groq_client.classify_and_phrase",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
+            result = asyncio.run(_primary_llm_match("suvage 10ml"))
+        assert result.perfume_id is None
+        assert result.llm_unavailable is True
+
+    def test_successful_empty_classification_does_not_mark_llm_unavailable(self):
+        """The core distinction this redesign exists to make: a genuinely
+        successful Groq call that found nothing confident is NOT the same
+        as an outage — llm_unavailable must stay False so match_perfume
+        trusts the "no" instead of falling through to keyword matching."""
+        with patch(
+            "app.groq_client.classify_and_phrase",
+            new_callable=AsyncMock,
+            return_value=GroqClassification(),
+        ):
+            result = asyncio.run(_primary_llm_match("suvage 10ml"))
+        assert result.perfume_id is None
+        assert result.llm_unavailable is False
 
 
 class TestMatchPerfumeGroqFirstWithFallback:
@@ -692,7 +722,8 @@ class TestMatchPerfumeGroqFirstWithFallback:
 
     def test_groq_failure_falls_through_to_exact_match(self):
         """A message that resolves fine via exact match must still work
-        even when Groq is completely down."""
+        even when Groq is completely down (a real exception — a genuine
+        outage, not just an unconfident answer)."""
         with patch(
             "app.groq_client.classify_and_phrase",
             new_callable=AsyncMock,
@@ -702,7 +733,30 @@ class TestMatchPerfumeGroqFirstWithFallback:
         assert result.perfume_id is not None
         assert result.layer == "exact"
 
-    def test_groq_no_confident_match_falls_through_to_exact_match(self):
+    def test_groq_unreachable_falls_through_to_exact_match(self):
+        """classify_and_phrase returning None (Groq truly unreachable — no
+        key, no candidates, API error) is the only "empty" outcome that
+        triggers the deterministic fallback."""
+        with patch(
+            "app.groq_client.classify_and_phrase",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
+            result = asyncio.run(match_perfume("sauvage"))
+        assert result.perfume_id is not None
+        assert result.layer == "exact"
+
+    def test_groq_confident_empty_answer_still_falls_through_to_exact_match(self):
+        """A successful Groq call that found nothing confident (empty
+        GroqClassification, not None) falls through to the deterministic
+        layer exactly like a genuine outage does — deliberately NOT gated
+        on llm_unavailable, see match_perfume's docstring for why: an
+        earlier attempt at trusting Groq's "no" as final regressed the
+        genuinely-ambiguous-family case (bare "9pm" reliably gets a single
+        low-confidence guess from Groq rather than all 4 real candidates).
+        The real fix for over-matching ("kaaf only" also matching an
+        unrelated product on the word "only") was GENERIC_STOPWORDS, not
+        disabling this fallback."""
         with patch(
             "app.groq_client.classify_and_phrase",
             new_callable=AsyncMock,
@@ -712,7 +766,17 @@ class TestMatchPerfumeGroqFirstWithFallback:
         assert result.perfume_id is not None
         assert result.layer == "exact"
 
-    def test_groq_and_exact_both_miss_falls_through_to_fuzzy(self):
+    def test_groq_and_exact_both_unreachable_falls_through_to_fuzzy(self):
+        with patch(
+            "app.groq_client.classify_and_phrase",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
+            result = asyncio.run(match_perfume("savage price please"))  # typo, misses exact
+        assert result.perfume_id is not None
+        assert result.layer == "fuzzy"
+
+    def test_groq_confident_empty_answer_still_falls_through_to_fuzzy(self):
         with patch(
             "app.groq_client.classify_and_phrase",
             new_callable=AsyncMock,
@@ -722,11 +786,30 @@ class TestMatchPerfumeGroqFirstWithFallback:
         assert result.perfume_id is not None
         assert result.layer == "fuzzy"
 
-    def test_everything_missing_returns_empty_result(self):
+    def test_kaaf_only_style_collision_no_longer_over_matches(self):
+        """Direct regression guard for the real reported bug, using the
+        exact wording that triggered it live: a request cue ("want") plus
+        a real keyword ("kaaf") must resolve to ONLY that keyword, not also
+        pick up an unrelated product via a coincidentally-generic word.
+        Fixed at the root by adding the offending word to GENERIC_STOPWORDS
+        rather than by suppressing the fallback layer — see
+        test_groq_confident_empty_answer_still_falls_through_to_exact_match
+        for why the fallback itself must keep running."""
         with patch(
             "app.groq_client.classify_and_phrase",
             new_callable=AsyncMock,
             return_value=GroqClassification(),
+        ):
+            result = asyncio.run(match_perfume("i want to confirm kaaf only"))
+        assert result.perfume_id is not None
+        assert result.matched_perfume_ids is None
+        assert result.ambiguous is False
+
+    def test_everything_missing_returns_empty_result(self):
+        with patch(
+            "app.groq_client.classify_and_phrase",
+            new_callable=AsyncMock,
+            return_value=None,
         ):
             result = asyncio.run(match_perfume("completely unrelated gibberish qzxjklw"))
         assert result.perfume_id is None
