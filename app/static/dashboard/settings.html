@@ -1,0 +1,104 @@
+<title>Settings — Sovereign Scents dashboard</title>
+<link rel="stylesheet" href="/dashboard/css/dashboard.css" />
+
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand">Sovereign Scents<small>Owner dashboard</small></div>
+    <a class="nav-link" href="/dashboard/index.html">Overview</a>
+    <a class="nav-link" href="/dashboard/gaps.html">Catalog gaps</a>
+    <a class="nav-link" href="/dashboard/upload.html">Upload catalog</a>
+    <a class="nav-link" href="/dashboard/versions.html">Versions</a>
+    <a class="nav-link active" href="/dashboard/settings.html">Settings</a>
+    <div class="nav-spacer"></div>
+    <div class="nav-foot">
+      <button class="theme-toggle" id="theme-toggle-btn">Toggle theme</button>
+      <button class="theme-toggle" id="logout-btn">Log out</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="page-header">
+      <div>
+        <h1>Settings</h1>
+        <p>Bot behavior you can change live, without a redeploy.</p>
+      </div>
+    </div>
+
+    <div class="card" id="handoff-card">
+      <p class="card-title">Human handoff pause</p>
+      <p class="card-subtitle">
+        Once you personally message a customer directly on WhatsApp (not through this bot),
+        the bot stays completely out of that conversation for this many hours — so it doesn't
+        talk over you while you're settling the order (address, payment, etc.). It picks back
+        up automatically once the window elapses.
+      </p>
+
+      <div style="display:flex; align-items:center; gap:10px; margin-top:14px">
+        <input
+          type="number"
+          id="pause-hours-input"
+          min="0.1"
+          max="720"
+          step="0.5"
+          style="width:100px; padding:8px 10px; border-radius:8px; border:1px solid var(--border-strong); background:var(--surface-card); color:var(--text-primary); font-size:14px"
+        />
+        <span class="small-muted">hours</span>
+        <button class="btn btn-primary" id="save-pause-hours-btn">Save</button>
+      </div>
+      <p class="form-error" id="pause-hours-error"></p>
+      <p class="small-muted" id="pause-hours-success" style="display:none;color:var(--status-good);font-weight:600"></p>
+    </div>
+  </main>
+</div>
+
+<script type="module">
+  import { apiFetch, wireShellChrome } from "/dashboard/js/common.js";
+
+  await wireShellChrome();
+
+  const input = document.getElementById("pause-hours-input");
+  const saveBtn = document.getElementById("save-pause-hours-btn");
+  const errorEl = document.getElementById("pause-hours-error");
+  const successEl = document.getElementById("pause-hours-success");
+
+  async function load() {
+    errorEl.style.display = "none";
+    try {
+      const { pause_hours } = await apiFetch("/api/admin/settings/handoff");
+      input.value = pause_hours;
+    } catch (err) {
+      errorEl.textContent = err.message;
+      errorEl.style.display = "block";
+    }
+  }
+
+  saveBtn.addEventListener("click", async () => {
+    errorEl.style.display = "none";
+    successEl.style.display = "none";
+    const hours = Number(input.value);
+    if (!hours || hours <= 0) {
+      errorEl.textContent = "Enter a positive number of hours.";
+      errorEl.style.display = "block";
+      return;
+    }
+
+    saveBtn.disabled = true;
+    saveBtn.textContent = "Saving…";
+    try {
+      await apiFetch("/api/admin/settings/handoff", {
+        method: "PUT",
+        body: JSON.stringify({ pause_hours: hours }),
+      });
+      successEl.textContent = "Saved.";
+      successEl.style.display = "block";
+    } catch (err) {
+      errorEl.textContent = err.message;
+      errorEl.style.display = "block";
+    } finally {
+      saveBtn.disabled = false;
+      saveBtn.textContent = "Save";
+    }
+  });
+
+  load();
+</script>

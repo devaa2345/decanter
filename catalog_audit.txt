@@ -1,0 +1,609 @@
+
+============================================================================================
+  CATALOG vs SOURCE SHEETS
+============================================================================================
+
+  Rows read from the sheets: 1942
+     1024  Sovereign Scents - Decant Sheet - Google Sheets.pdf
+      245  Sovereign Scents - Decant Sheet - Google Sheets2.pdf
+      673  Sovereign Scents - Decant Sheet - Google sheets3.pdf
+  Catalog entries: 1208
+
+  --- 1. Duplicate catalog entries -------------------------------
+  Products listed more than once      : 57
+  ...of those, with CONFLICTING prices: 35
+  Redundant entries in total          : 92
+
+  Which price a customer gets depends on which copy ranks first:
+    Afnan Rare tiffany
+        afnanrare_tiffany                                  {'3ml': 130, '5ml': 170, '8ml': 250, '10ml': 320, '20ml': 580, '30ml': 800, '100ml_full': 2700}
+        afnanrare_tiffany_2                                {'3ml': 170, '5ml': 250, '8ml': 320, '10ml': 580, '20ml': 800}
+    Ahmed Al Maghribi Rose Noir
+        ahmed_al_maghribirose_noir                         {'3ml': 160, '5ml': 230, '8ml': 340, '10ml': 430, '20ml': 760, '30ml': 1080, '75ml_full': 2600}
+        ahmed_al_maghribirose_noir_2                       {'3ml': 210, '5ml': 320, '8ml': 380, '10ml': 760, '20ml': 1080, '30ml': 120}
+    Arabiyat Prestige Swar Venin
+        arabiyat_prestigeswar_venin                        {'3ml': 150, '5ml': 200, '8ml': 300, '10ml': 380, '20ml': 680, '30ml': 940}
+        arabiyat_prestigeswar_venin_2                      {'3ml': 150, '5ml': 200, '8ml': 300, '10ml': 380, '20ml': 680}
+    Armaf Armaf
+        armafarmaf                                         {'3ml': 110, '5ml': 140, '8ml': 200, '10ml': 250, '20ml': 440, '30ml': 550}
+        armafarmaf_2                                       {'3ml': 150, '5ml': 210, '8ml': 300, '10ml': 380, '20ml': 700}
+        armafarmaf_3                                       {'3ml': 150, '5ml': 210, '8ml': 310, '10ml': 390, '20ml': 720}
+        armafarmaf_4                                       {'3ml': 150, '5ml': 220, '8ml': 280, '10ml': 520, '20ml': 750}
+        armafarmaf_5                                       {'3ml': 140, '5ml': 200, '8ml': 260, '10ml': 480}
+    Burberry Burberry
+        burberryburberry                                   {'3ml': 300, '5ml': 450, '8ml': 680, '10ml': 820}
+        burberryburberry_2                                 {'3ml': 320, '5ml': 480, '8ml': 740, '10ml': 920, '20ml': 1660, '30ml': 2410}
+        burberryburberry_3                                 {'3ml': 260, '5ml': 380, '8ml': 560, '10ml': 690}
+        burberryburberry_4                                 {'3ml': 230, '5ml': 350, '8ml': 530, '10ml': 660}
+        burberryburberry_5                                 {'3ml': 300, '5ml': 450, '8ml': 700, '10ml': 870}
+        burberryburberry_6                                 {'3ml': 300, '5ml': 450, '8ml': 700, '10ml': 870}
+    Carolina Herrera 5%  NA
+        carolina_herrera5_na                               {'3ml': 360, '5ml': 560, '8ml': 870, '10ml': 1080}
+        carolina_herrera5_na_2                             {'3ml': 420, '5ml': 650, '8ml': 1020, '10ml': 1240}
+    Chanel 5%  NA
+        chanel5_na                                         {'3ml': 520, '5ml': 820, '8ml': 1290, '10ml': 1600, '20ml': 2980}
+        chanel5_na_2                                       {'3ml': 320, '5ml': 470, '8ml': 740, '10ml': 920}
+        chanel5_na_3                                       {'3ml': 420, '5ml': 650, '8ml': 1020, '10ml': 1240}
+        chanel5_na_4                                       {'3ml': 370, '5ml': 570, '8ml': 880, '10ml': 1080}
+        chanel5_na_5                                       {'3ml': 320, '5ml': 470, '8ml': 740, '10ml': 920}
+        chanel5_na_6                                       {'3ml': 320, '5ml': 470, '8ml': 740, '10ml': 920}
+        chanel5_na_7                                       {'3ml': 320, '5ml': 470, '8ml': 740, '10ml': 920}
+        chanel5_na_8                                       {'3ml': 520, '5ml': 820, '8ml': 1290, '10ml': 1600, '20ml': 2980, '30ml': 240}
+    Chanel DKNY
+        chaneldkny                                         {'3ml': 130, '5ml': 180, '8ml': 260, '10ml': 340}
+        chaneldkny_2                                       {'3ml': 130, '5ml': 180, '8ml': 260, '10ml': 340}
+        chaneldkny_3                                       {'3ml': 130, '5ml': 180, '8ml': 260, '10ml': 340, '20ml': 130, '30ml': 160}
+    Chanel Gucci
+        chanelgucci                                        {'3ml': 230, '5ml': 350, '8ml': 530, '10ml': 660}
+        chanelgucci_2                                      {'3ml': 290, '5ml': 430, '8ml': 670, '10ml': 820}
+        chanelgucci_3                                      {'3ml': 300, '5ml': 450, '8ml': 660, '10ml': 780}
+        chanelgucci_4                                      {'3ml': 230, '5ml': 340, '8ml': 520, '10ml': 640}
+        chanelgucci_5                                      {'3ml': 320, '5ml': 480, '8ml': 720, '10ml': 880}
+        chanelgucci_6                                      {'3ml': 320, '5ml': 480, '8ml': 720, '10ml': 880}
+        chanelgucci_7                                      {'3ml': 320, '5ml': 480, '8ml': 720, '10ml': 880}
+        chanelgucci_8                                      {'3ml': 320, '5ml': 480, '8ml': 720, '10ml': 880}
+        chanelgucci_9                                      {'3ml': 320, '5ml': 480, '8ml': 720, '10ml': 880}
+        chanelgucci_10                                     {'3ml': 250, '5ml': 390, '8ml': 610, '10ml': 750}
+    Cherry Bouquet Tom Ford Lost Cherry
+        cherry_bouquettom_ford_lost_cherry                 {'3ml': 190, '5ml': 260, '8ml': 400, '10ml': 490, '20ml': 940, '30ml': 1340, '100ml_full': 3300}
+        cherry_bouquettom_ford_lost_cherry_2               {'3ml': 190, '5ml': 260, '8ml': 400, '10ml': 490}
+    Delicious Bouquet D&G Devotion
+        delicious_bouquetdg_devotion                       {'3ml': 190, '5ml': 260, '8ml': 400, '10ml': 490, '20ml': 940, '30ml': 1340, '80ml_full': 3300}
+        delicious_bouquetdg_devotion_2                     {'3ml': 190, '5ml': 260, '8ml': 400, '10ml': 490}
+    French Avenue Cocoa Morado
+        french_avenuecocoa_morado                          {'3ml': 150, '5ml': 210, '8ml': 310, '10ml': 390, '20ml': 720, '30ml': 980, '100ml_full': 2550}
+        french_avenuecocoa_morado_2                        {'3ml': 130, '5ml': 180, '8ml': 260, '10ml': 350, '20ml': 650, '30ml': 900}
+    Guerlain 5% NA
+        guerlain5_na                                       {'3ml': 400, '5ml': 610, '8ml': 960, '10ml': 1180}
+        guerlain5_na_2                                     {'3ml': 370, '5ml': 580, '8ml': 900, '10ml': 1100}
+    Guerlain Giorgio Armani
+        guerlaingiorgio_armani                             {'3ml': 250, '5ml': 370, '8ml': 560, '10ml': 690}
+        guerlaingiorgio_armani_2                           {'3ml': 270, '5ml': 400, '8ml': 620, '10ml': 750}
+    Guerlain Guerlain
+        guerlainguerlain                                   {'3ml': 290, '5ml': 440, '8ml': 670, '10ml': 830}
+        guerlainguerlain_2                                 {'3ml': 290, '5ml': 440, '8ml': 670, '10ml': 830}
+        guerlainguerlain_3                                 {'3ml': 290, '5ml': 440, '8ml': 670, '10ml': 830}
+        guerlainguerlain_4                                 {'3ml': 310, '5ml': 460, '8ml': 720, '10ml': 880}
+        guerlainguerlain_5                                 {'3ml': 310, '5ml': 460, '8ml': 720, '10ml': 880}
+    Lancôme Lancôme
+        lancmelancme                                       {'3ml': 260, '5ml': 380, '8ml': 590, '10ml': 720}
+        lancmelancme_2                                     {'3ml': 280, '5ml': 420, '8ml': 660, '10ml': 780}
+    Lattafa Eclaire
+        lattafaeclaire                                     {'3ml': 130, '5ml': 180, '8ml': 250, '10ml': 350, '20ml': 640, '30ml': 850, '100ml_full': 2350}
+        lattafaeclaire_2                                   {'3ml': 180, '5ml': 250, '8ml': 340, '10ml': 620, '20ml': 860}
+    Lattafa Khamrah
+        lattafakhamrah                                     {'3ml': 160, '5ml': 230, '8ml': 330, '10ml': 420, '20ml': 780, '30ml': 1070}
+        lattafakhamrah_2                                   {'3ml': 190, '5ml': 300, '8ml': 370, '10ml': 680, '20ml': 930}
+    Lattafa Khamrah Qahwa
+        lattafakhamrah_qahwa                               {'3ml': 160, '5ml': 230, '8ml': 330, '10ml': 420, '20ml': 780, '30ml': 1070, '100ml_full': 3000}
+        lattafakhamrah_qahwa_2                             {'3ml': 190, '5ml': 300, '8ml': 370, '10ml': 680, '20ml': 930}
+    Lattafa Lattafa
+        lattafalattafa                                     {'3ml': 150, '5ml': 210, '8ml': 310, '10ml': 390}
+        lattafalattafa_2                                   {'3ml': 150, '5ml': 220, '8ml': 270, '10ml': 669}
+        lattafalattafa_3                                   {'3ml': 150, '5ml': 220, '8ml': 270, '10ml': 750}
+        lattafalattafa_4                                   {'3ml': 150, '5ml': 200, '8ml': 300, '10ml': 370, '20ml': 680}
+        lattafalattafa_5                                   {'3ml': 160, '5ml': 230, '8ml': 300, '10ml': 540, '20ml': 740}
+        lattafalattafa_6                                   {'3ml': 160, '5ml': 230, '8ml': 300, '10ml': 540, '20ml': 740, '30ml': 210}
+    Lattafa Mashrabya
+        lattafamashrabya                                   {'3ml': 130, '5ml': 170, '8ml': 240, '10ml': 320, '100ml_full': 2250}
+        lattafamashrabya_2                                 {'3ml': 170, '5ml': 240, '8ml': 320, '10ml': 840}
+    Lattafa Musamam White Intense
+        lattafamusamam_white_intense                       {'3ml': 150, '5ml': 200, '8ml': 300, '10ml': 380, '20ml': 870}
+        lattafamusamam_white_intense_2                     {'3ml': 200, '5ml': 300, '8ml': 380, '10ml': 660, '20ml': 880}
+    Maison Alhambra Bright Peach
+        maison_alhambrabright_peach                        {'3ml': 130, '5ml': 180, '8ml': 250, '10ml': 310, '20ml': 580, '80ml_full': 1550}
+        maison_alhambrabright_peach_2                      {'3ml': 120, '5ml': 160, '8ml': 220, '10ml': 280, '20ml': 500, '30ml': 700}
+    Maison Alhambra Kismet Magic
+        maison_alhambrakismet_magic                        {'3ml': 130, '5ml': 180, '8ml': 250, '10ml': 320, '20ml': 580, '30ml': 760, '100ml_full': 1975}
+        maison_alhambrakismet_magic_2                      {'3ml': 130, '5ml': 180, '8ml': 250, '10ml': 320, '20ml': 580, '30ml': 760}
+    Maison Alhambra Porto Neroli
+        maison_alhambraporto_neroli                        {'3ml': 130, '5ml': 180, '8ml': 250, '10ml': 310, '20ml': 580, '80ml_full': 1550}
+        maison_alhambraporto_neroli_2                      {'3ml': 120, '5ml': 160, '8ml': 220, '10ml': 280, '20ml': 500, '30ml': 800}
+    Maison Asrar Vanilla Voyage
+        maison_asrarvanilla_voyage                         {'3ml': 150, '5ml': 210, '8ml': 300, '10ml': 380, '100ml_full': 2700}
+        maison_asrarvanilla_voyage_2                       {'3ml': 150, '5ml': 210, '8ml': 300, '10ml': 380}
+    Mancera Instant Crush
+        mancerainstant_crush                               {'3ml': 280, '5ml': 420, '8ml': 640, '10ml': 790, '20ml': 1420, '30ml': 2050}
+        mancerainstant_crush_2                             {'3ml': 260, '5ml': 370, '8ml': 560, '10ml': 660}
+    Mystique Bouquet Parfums de Marly Valaya
+        mystique_bouquetparfums_de_marly_valaya            {'3ml': 190, '5ml': 260, '8ml': 400, '10ml': 490, '20ml': 940, '30ml': 1340, '80ml_full': 3300}
+        mystique_bouquetparfums_de_marly_valaya_2          {'3ml': 190, '5ml': 260, '8ml': 400, '10ml': 490}
+    Paris Corner Khair
+        paris_cornerkhair                                  {'3ml': 110, '5ml': 150, '8ml': 210, '10ml': 270, '20ml': 480, '30ml': 610, '100ml_full': 1500}
+        paris_cornerkhair_2                                {'3ml': 110, '5ml': 150, '8ml': 210, '10ml': 270, '20ml': 480, '30ml': 610}
+    Prada 5%NA
+        prada5na                                           {'3ml': 330, '5ml': 500, '8ml': 770, '10ml': 900}
+        prada5na_2                                         {'3ml': 330, '5ml': 500, '8ml': 770, '10ml': 900}
+        prada5na_3                                         {'3ml': 360, '5ml': 560, '8ml': 870, '10ml': 1070}
+        prada5na_4                                         {'3ml': 360, '5ml': 560, '8ml': 870, '10ml': 1070}
+    Versace Valentino
+        versacevalentino                                   {'3ml': 330, '5ml': 490, '8ml': 720, '10ml': 860}
+        versacevalentino_2                                 {'3ml': 300, '5ml': 440, '8ml': 640, '10ml': 780, '20ml': 300, '30ml': 450}
+    Versace Versace
+        versaceversace                                     {'3ml': 260, '5ml': 380, '8ml': 580, '10ml': 720}
+        versaceversace_2                                   {'3ml': 210, '5ml': 300, '8ml': 460, '10ml': 570}
+    Zimaya Musk Is Great
+        zimayamusk_is_great                                {'3ml': 110, '5ml': 150, '8ml': 210, '10ml': 270, '20ml': 480, '100ml_full': 1550}
+        zimayamusk_is_great_2                              {'3ml': 110, '5ml': 150, '8ml': 210, '10ml': 270, '20ml': 480, '30ml': 610}
+    Zimaya Tiramisu Coco
+        zimayatiramisu_coco                                {'3ml': 130, '5ml': 180, '8ml': 250, '10ml': 320, '20ml': 560, '30ml': 740, '100ml_full': 2050}
+        zimayatiramisu_coco_2                              {'3ml': 130, '5ml': 180, '8ml': 250, '10ml': 310}
+    Zimaya Tiramisu S'mores
+        zimayatiramisu_smores                              {'3ml': 130, '5ml': 170, '8ml': 240, '10ml': 320, '20ml': 560, '30ml': 740, '100ml_full': 2250}
+        zimayatiramisu_smores_2                            {'3ml': 170, '5ml': 240, '8ml': 320, '10ml': 560, '20ml': 740}
+
+  --- 2. Decant sheets vs catalog --------------------------------
+  Decant rows on the sheets      : 1269
+  Matched, every price agrees    : 748
+  PRICE MISMATCH                 : 179
+  ON SHEET, MISSING FROM CATALOG : 351
+
+  Price mismatches (showing 50 of 179):
+    Afnan Supremacy Incense   [e Sheets p1]  -> afnansupremacy_incense
+              30ml  sheet ₹1150   catalog —
+    Afnan Supremacy In Oud   [e Sheets p1]  -> afnansupremacy_in_oud
+              30ml  sheet ₹950   catalog —
+    Afnan Supremacy Noir   [e Sheets p1]  -> afnansupremacy_noir
+              30ml  sheet ₹950   catalog —
+    Afnan Rare tiffany   [e Sheets p1]  -> afnanrare_tiffany_2
+               3ml  sheet ₹130   catalog ₹170
+               5ml  sheet ₹170   catalog ₹250
+               8ml  sheet ₹250   catalog ₹320
+              10ml  sheet ₹320   catalog ₹580
+              20ml  sheet ₹580   catalog ₹800
+              30ml  sheet ₹800   catalog —
+    Ahmed Al Maghribi Oud Couture   [e Sheets p1]  -> oud_coutureahmed_al_maghribi
+              20ml  sheet ₹500   catalog ₹520
+    Ahmed Al Maghribi Blue   [e Sheets p1]  -> ahmed_al_maghribiblue_oud
+               3ml  sheet ₹120   catalog ₹130
+              10ml  sheet ₹310   catalog ₹320
+              20ml  sheet ₹540   catalog —
+              30ml  sheet ₹710   catalog —
+    Ahmed Al Maghribi Rose Noir   [e Sheets p1]  -> ahmed_al_maghribirose_noir_2
+               3ml  sheet ₹160   catalog ₹210
+               5ml  sheet ₹230   catalog ₹320
+               8ml  sheet ₹340   catalog ₹380
+              10ml  sheet ₹430   catalog ₹760
+              20ml  sheet ₹760   catalog ₹1080
+              30ml  sheet ₹1080   catalog ₹120
+    Al Haramain Amber Gold Extreme   [e Sheets p1]  -> al_haramainamber_gold_extreme
+              30ml  sheet ₹1600   catalog —
+    Al Haramain Amber Ruby Edition   [e Sheets p1]  -> al_haramainamber_ruby_edition
+              30ml  sheet ₹1600   catalog —
+    Al Haramain L'Aventure Intense   [e Sheets p2]  -> al_haramainlaventure_intense
+              30ml  sheet ₹1380   catalog —
+    Al Haramain Detour Noir   [e Sheets p2]  -> al_haramaindetour_noir
+              30ml  sheet ₹820   catalog —
+    Al Haramain Detour Eco   [e Sheets p2]  -> al_haramaindetour_eco
+              30ml  sheet ₹820   catalog —
+    Al Haramain Detour Exclusif Noir   [e Sheets p2]  -> al_haramaindetour_exclusif_noir
+              30ml  sheet ₹820   catalog —
+    Al Haramain Detour intense Noir   [e Sheets p2]  -> al_haramaindetour_intense_noir
+              30ml  sheet ₹820   catalog —
+    Arabiyat Prestige Swar Venin   [e Sheets p3]  -> arabiyat_prestigeswar_venin_2
+              30ml  sheet ₹940   catalog —
+    Arabiyat Prestige Oud Al Layal Midnight .   [e Sheets p3]  -> arabiyat_prestigeoud_al_layal_midnight
+               5ml  sheet ₹130   catalog ₹170
+               8ml  sheet ₹170   catalog ₹210
+              10ml  sheet ₹210   catalog ₹380
+              20ml  sheet ₹380   catalog ₹480
+              30ml  sheet ₹480   catalog —
+    Armaf Soul   [e Sheets p3]  -> armafsoul
+               3ml  sheet ₹110   catalog —
+               5ml  sheet ₹140   catalog —
+               8ml  sheet ₹200   catalog —
+              10ml  sheet ₹250   catalog —
+              20ml  sheet ₹440   catalog —
+              30ml  sheet ₹550   catalog —
+    Armaf Spartacus   [e Sheets p3]  -> armafspartacus
+               3ml  sheet ₹150   catalog —
+               5ml  sheet ₹210   catalog —
+               8ml  sheet ₹300   catalog —
+              10ml  sheet ₹380   catalog —
+              20ml  sheet ₹700   catalog —
+    Armaf Club de Nuit Untold   [e Sheets p3]  -> armafclub_de_nuit_untold
+              30ml  sheet ₹1070   catalog —
+    Armaf Signature Night   [e Sheets p3]  -> armafsignature_night
+               5ml  sheet ₹130   catalog ₹180
+               8ml  sheet ₹180   catalog ₹240
+              10ml  sheet ₹240   catalog ₹550
+              30ml  sheet ₹550   catalog —
+    Dumont Nitro Red   [e Sheets p3]  -> dumontnitro_red
+               5ml  sheet ₹210   catalog ₹220
+               8ml  sheet ₹310   catalog ₹320
+              10ml  sheet ₹390   catalog ₹400
+              20ml  sheet ₹700   catalog ₹720
+              30ml  sheet ₹950   catalog ₹980
+    Fragrance Word StarMen Nebula   [e Sheets p4]  -> fragrance_wordstarmen_nebula
+               5ml  sheet ₹130   catalog ₹180
+               8ml  sheet ₹180   catalog ₹240
+              10ml  sheet ₹240   catalog ₹420
+              20ml  sheet ₹420   catalog ₹560
+              30ml  sheet ₹560   catalog —
+    Fragrance World Bavaria Pour Homme   [e Sheets p4]  -> fragrance_worldbavaria_pour_homme
+               5ml  sheet ₹130   catalog ₹180
+               8ml  sheet ₹180   catalog ₹240
+              10ml  sheet ₹240   catalog ₹420
+              20ml  sheet ₹420   catalog ₹560
+              30ml  sheet ₹560   catalog —
+    Fragrance Word Royal Blend   [e Sheets p4]  -> fragrance_wordroyal_blend
+              30ml  sheet ₹820   catalog —
+    Fragrance Word Royal Blend Vintage   [e Sheets p4]  -> fragrance_wordroyal_blend_vintage
+              30ml  sheet ₹820   catalog —
+    Fragrance Word Royal Blend Nero   [e Sheets p4]  -> fragrance_wordroyal_blend_nero
+              30ml  sheet ₹820   catalog —
+    Fragrance Word Royal Blend Bourbon   [e Sheets p4]  -> fragrance_wordroyal_blend_bourbon
+              30ml  sheet ₹820   catalog —
+    Fragrance World F Le Parfum   [e Sheets p4]  -> fragrance_worldf_le_parfum
+               5ml  sheet ₹130   catalog ₹190
+               8ml  sheet ₹190   catalog ₹240
+              10ml  sheet ₹240   catalog ₹730
+              30ml  sheet ₹730   catalog —
+    Fragrance World F EDP   [e Sheets p4]  -> fragrance_worldf_edp
+               5ml  sheet ₹130   catalog ₹190
+               8ml  sheet ₹190   catalog ₹240
+              10ml  sheet ₹240   catalog ₹730
+              30ml  sheet ₹730   catalog —
+    Fragrance World Supreme L'homme Extreme   [e Sheets p4]  -> fragrance_worldsupreme_lhomme_extreme
+               5ml  sheet ₹130   catalog ₹190
+               8ml  sheet ₹190   catalog ₹240
+              10ml  sheet ₹240   catalog ₹640
+              30ml  sheet ₹640   catalog —
+    Fragrance World Proud of You absolute   [e Sheets p4]  -> fragrance_worldproud_of_you_absolute
+               5ml  sheet ₹130   catalog ₹190
+               8ml  sheet ₹190   catalog ₹240
+              10ml  sheet ₹240   catalog ₹420
+              20ml  sheet ₹420   catalog ₹550
+              30ml  sheet ₹550   catalog —
+    Fragrance World Proud of You Tobbaco   [e Sheets p4]  -> fragrance_worldproud_of_you_tobbaco
+               5ml  sheet ₹130   catalog ₹190
+               8ml  sheet ₹190   catalog ₹240
+              10ml  sheet ₹240   catalog ₹420
+              20ml  sheet ₹420   catalog ₹550
+              30ml  sheet ₹550   catalog —
+    Fragrance World Proud of You Intensely   [e Sheets p4]  -> fragrance_worldproud_of_you_intensely
+               5ml  sheet ₹130   catalog ₹190
+               8ml  sheet ₹190   catalog ₹240
+              10ml  sheet ₹240   catalog ₹420
+              20ml  sheet ₹420   catalog ₹550
+              30ml  sheet ₹550   catalog —
+    Fragrance World Proud of You   [e Sheets p4]  -> fragrance_worldproud_of_you
+               5ml  sheet ₹130   catalog ₹190
+               8ml  sheet ₹190   catalog ₹240
+              10ml  sheet ₹240   catalog ₹420
+              20ml  sheet ₹420   catalog ₹550
+              30ml  sheet ₹550   catalog —
+    Fragrance World Proud of You oud   [e Sheets p4]  -> fragrance_worldproud_of_you_oud
+               5ml  sheet ₹130   catalog ₹190
+               8ml  sheet ₹190   catalog ₹240
+              10ml  sheet ₹240   catalog ₹420
+              20ml  sheet ₹420   catalog ₹550
+              30ml  sheet ₹550   catalog —
+    Fragrance World Proud of You Amber   [e Sheets p4]  -> fragrance_worldproud_of_you_amber
+               5ml  sheet ₹130   catalog ₹190
+               8ml  sheet ₹190   catalog ₹240
+              10ml  sheet ₹240   catalog ₹420
+              20ml  sheet ₹420   catalog ₹550
+              30ml  sheet ₹550   catalog —
+    Fragrance World Proud of You leather   [e Sheets p4]  -> fragrance_worldproud_of_you_leather
+               5ml  sheet ₹130   catalog ₹190
+               8ml  sheet ₹190   catalog ₹240
+              10ml  sheet ₹240   catalog ₹420
+              20ml  sheet ₹420   catalog ₹550
+              30ml  sheet ₹550   catalog —
+    Fragrance World Mark & Victor Eau De Spice   [e Sheets p4]  -> fragrance_worldmark_victor_eau_de_spice
+               5ml  sheet ₹130   catalog ₹190
+               8ml  sheet ₹190   catalog ₹240
+              10ml  sheet ₹240   catalog ₹699
+              30ml  sheet ₹699   catalog —
+    Fragrance World Suits   [e Sheets p4]  -> fragrance_worldsuits
+               5ml  sheet ₹130   catalog ₹190
+               8ml  sheet ₹190   catalog ₹240
+              10ml  sheet ₹240   catalog ₹699
+              30ml  sheet ₹699   catalog —
+    Fragrance World Genuine Man Society   [e Sheets p4]  -> fragrance_worldgenuine_man_society
+               5ml  sheet ₹130   catalog ₹190
+               8ml  sheet ₹190   catalog ₹240
+              10ml  sheet ₹240   catalog ₹699
+              30ml  sheet ₹699   catalog —
+    Fragrance World Urban Man Amaze   [e Sheets p4]  -> fragrance_worldurban_man_amaze
+               5ml  sheet ₹110   catalog ₹160
+               8ml  sheet ₹160   catalog ₹220
+              10ml  sheet ₹220   catalog ₹400
+              20ml  sheet ₹400   catalog ₹520
+              30ml  sheet ₹520   catalog —
+    Fragrance World Urban Man Paradise   [e Sheets p4]  -> fragrance_worldurban_man_paradise
+               5ml  sheet ₹110   catalog ₹160
+               8ml  sheet ₹160   catalog ₹220
+              10ml  sheet ₹220   catalog ₹400
+              20ml  sheet ₹400   catalog ₹520
+              30ml  sheet ₹520   catalog —
+    Fragrance world Destinations   [e Sheets p4]  -> fragrance_worlddestinations
+               5ml  sheet ₹130   catalog ₹180
+               8ml  sheet ₹180   catalog ₹240
+              10ml  sheet ₹240   catalog ₹420
+              20ml  sheet ₹420   catalog ₹550
+              30ml  sheet ₹550   catalog —
+    Fragrance world Harmony Code   [e Sheets p4]  -> fragrance_worldharmony_code
+               5ml  sheet ₹130   catalog ₹180
+               8ml  sheet ₹180   catalog ₹240
+              10ml  sheet ₹240   catalog ₹420
+              20ml  sheet ₹420   catalog ₹550
+              30ml  sheet ₹550   catalog —
+    Fragrance World Bad Lad   [e Sheets p4]  -> fragrance_worldbad_lad
+               5ml  sheet ₹130   catalog ₹180
+               8ml  sheet ₹180   catalog ₹240
+              10ml  sheet ₹240   catalog ₹420
+              20ml  sheet ₹420   catalog ₹550
+              30ml  sheet ₹550   catalog —
+    Fragrance world Georgio Black Special Edition   [e Sheets p4]  -> fragrance_worldgeorgio_black_special_edition
+               5ml  sheet ₹130   catalog ₹180
+               8ml  sheet ₹180   catalog ₹240
+              10ml  sheet ₹240   catalog ₹420
+              20ml  sheet ₹420   catalog ₹550
+              30ml  sheet ₹550   catalog —
+    Franck Oliver Oud Touch   [e Sheets p5]  -> frank_oliveroud_touch
+               3ml  sheet ₹120   catalog ₹110
+               5ml  sheet ₹170   catalog ₹150
+               8ml  sheet ₹240   catalog ₹210
+              10ml  sheet ₹310   catalog ₹280
+              20ml  sheet ₹540   catalog ₹520
+    French Avenue Cocoa Morado   [e Sheets p5]  -> french_avenuecocoa_morado_2
+               3ml  sheet ₹150   catalog ₹130
+               5ml  sheet ₹210   catalog ₹180
+               8ml  sheet ₹310   catalog ₹260
+              10ml  sheet ₹390   catalog ₹350
+              20ml  sheet ₹720   catalog ₹650
+              30ml  sheet ₹980   catalog ₹900
+    Khadlaj Epoque Artistique   [e Sheets p6]  -> khadlajepoque_artistique_edp
+               3ml  sheet ₹130   catalog —
+               5ml  sheet ₹170   catalog —
+               8ml  sheet ₹250   catalog —
+              10ml  sheet ₹310   catalog —
+              20ml  sheet ₹560   catalog —
+              30ml  sheet ₹740   catalog —
+    Lattafa Eclaire   [e Sheets p6]  -> lattafaeclaire_2
+               3ml  sheet ₹130   catalog ₹180
+               5ml  sheet ₹180   catalog ₹250
+               8ml  sheet ₹250   catalog ₹340
+              10ml  sheet ₹350   catalog ₹620
+              20ml  sheet ₹640   catalog ₹860
+              30ml  sheet ₹850   catalog —
+
+  On the decant sheet but not in the catalog (351):
+    Amaran Kafu   [e Sheets p1]
+        3ml ₹180, 5ml ₹260, 8ml ₹380, 10ml ₹480
+    Afnan Supremacy Pour Homme (Silver)   [e Sheets p1]
+        3ml ₹140, 5ml ₹190, 8ml ₹280, 10ml ₹350, 20ml ₹680, 30ml ₹940
+    Afnan Delicious Bouquet   [e Sheets p1]
+        3ml ₹190, 5ml ₹260, 8ml ₹400, 10ml ₹490, 20ml ₹940, 30ml ₹1340
+    Afnan Cherry Bouquet   [e Sheets p1]
+        3ml ₹190, 5ml ₹260, 8ml ₹400, 10ml ₹490, 20ml ₹940, 30ml ₹1340
+    Afnan Mystique Bouquet   [e Sheets p1]
+        3ml ₹190, 5ml ₹260, 8ml ₹400, 10ml ₹490, 20ml ₹940, 30ml ₹1340
+    Afnan Supremacy Collector's Edition   [e Sheets p1]
+        3ml ₹170, 5ml ₹250, 8ml ₹370, 10ml ₹470, 20ml ₹860, 30ml ₹1190
+    Afnan Rare Carbon   [e Sheets p1]
+        3ml ₹150, 5ml ₹210, 8ml ₹300, 10ml ₹380, 20ml ₹680, 30ml ₹920
+    Afnan Rare Reef   [e Sheets p1]
+        3ml ₹150, 5ml ₹210, 8ml ₹300, 10ml ₹380, 20ml ₹680, 30ml ₹920
+    Ahmed Al Maghribi AHL   [e Sheets p1]
+        3ml ₹240, 5ml ₹360, 8ml ₹540, 10ml ₹680, 20ml ₹1300
+    Al Haramain Aqua Dubai   [e Sheets p1]
+        3ml ₹220, 5ml ₹320, 8ml ₹490, 10ml ₹620, 20ml ₹1140
+    Albait Niche Apple Brandy   [e Sheets p2]
+        3ml ₹150, 5ml ₹200, 8ml ₹300, 10ml ₹380, 20ml ₹680, 30ml ₹940
+    Al Rehab Choco Musk   [e Sheets p2]
+        5ml ₹120, 8ml ₹160
+    Al Rehab Choco Musk Marshmallow   [e Sheets p2]
+        5ml ₹120, 8ml ₹160
+    Arabiyat Prestige Oud Al Layal   [e Sheets p3]
+        5ml ₹110, 8ml ₹140, 10ml ₹180
+    Arabiyat Prestige Oud Al Layal Aswad   [e Sheets p3]
+        5ml ₹110, 8ml ₹140, 10ml ₹180
+    Armaf Dunescape   [e Sheets p3]
+        3ml ₹150, 5ml ₹220, 8ml ₹320, 10ml ₹400, 20ml ₹720, 30ml ₹980
+    Armaf Aura   [e Sheets p3]
+        3ml ₹120, 5ml ₹160, 8ml ₹230, 10ml ₹290, 20ml ₹520
+    Armaf Aura Fresh   [e Sheets p3]
+        3ml ₹120, 5ml ₹160, 8ml ₹230, 10ml ₹290, 20ml ₹520
+    Armaf Blue Homme   [e Sheets p3]
+        3ml ₹120, 5ml ₹160, 8ml ₹230, 10ml ₹290, 20ml ₹520
+    Armaf Old Money   [e Sheets p3]
+        3ml ₹150, 5ml ₹210, 8ml ₹310, 10ml ₹390, 20ml ₹720
+    Armaf Lion's Club Monarque   [e Sheets p3]
+        3ml ₹180, 5ml ₹270, 8ml ₹400, 10ml ₹500
+    Armaf Lions Club Majestueux   [e Sheets p3]
+        3ml ₹180, 5ml ₹270, 8ml ₹400, 10ml ₹500
+    Armaf Parfum   [e Sheets p3]
+        3ml ₹210, 5ml ₹320, 8ml ₹480, 10ml ₹610, 20ml ₹1120, 30ml ₹1580
+    Armaf Club de Nuit Milestone   [e Sheets p3]
+        3ml ₹160, 5ml ₹230, 8ml ₹330, 10ml ₹420, 20ml ₹760, 30ml ₹1040
+    Armaf Odyssey Homme   [e Sheets p3]
+        3ml ₹130, 5ml ₹170, 8ml ₹240, 10ml ₹300, 20ml ₹540, 30ml ₹700
+    Armaf Ventana Black   [e Sheets p3]
+        5ml ₹140, 8ml ₹200, 10ml ₹260
+    Armaf Ventana Marine   [e Sheets p3]
+        3ml ₹130, 5ml ₹180, 8ml ₹250, 10ml ₹320
+    Artisan Perfumery Arabian Incense   [e Sheets p3]
+        3ml ₹130, 5ml ₹180, 8ml ₹250, 10ml ₹340
+    Dumont Nitro Red Intensely   [e Sheets p4]
+        3ml ₹160, 5ml ₹240, 8ml ₹350, 10ml ₹440, 20ml ₹800, 30ml ₹1100
+    Nitro Pour Homme Intense   [e Sheets p4]
+        3ml ₹140, 5ml ₹190, 8ml ₹280, 10ml ₹350, 20ml ₹640
+    Fragrance World Genuine Man vany Reserve   [e Sheets p4]
+        5ml ₹130, 8ml ₹180, 10ml ₹240, 20ml ₹420, 30ml ₹560
+    Fragrance world Supreme L'homme   [e Sheets p4]
+        5ml ₹130, 8ml ₹190, 10ml ₹240
+    Fragrance World Vanille en Tobbaco   [e Sheets p4]
+        5ml ₹130, 8ml ₹180, 10ml ₹240
+    Fragrance World Urban Man Le Parfum   [e Sheets p4]
+        5ml ₹140, 8ml ₹190, 10ml ₹240
+    Fragrance world Jacques Yves Imaginari   [e Sheets p4]
+        5ml ₹130, 8ml ₹180, 10ml ₹240
+    Fragrance world Aqua Pura   [e Sheets p4]
+        5ml ₹120, 8ml ₹150, 10ml ₹180
+    French Avenue Thunder   [e Sheets p4]
+        3ml ₹170, 5ml ₹230, 8ml ₹340, 10ml ₹420
+    French Avenue Firestorm   [e Sheets p4]
+        3ml ₹170, 5ml ₹230, 8ml ₹340, 10ml ₹420
+    Franck Oliver Oud Vanille   [e Sheets p5]
+        3ml ₹120, 5ml ₹170, 8ml ₹240, 10ml ₹310, 20ml ₹540
+    French Avenue Iris Patchouli   [e Sheets p5]
+        3ml ₹230, 5ml ₹350
+    French Avenue Aromatix Sun Kissed   [e Sheets p5]
+        3ml ₹180, 5ml ₹270, 8ml ₹400, 10ml ₹500
+    French Avenue Aromatix Tease Me   [e Sheets p5]
+        3ml ₹180, 5ml ₹270, 8ml ₹400, 10ml ₹500
+    French Avenue Aromatix Magnetiq   [e Sheets p5]
+        3ml ₹180, 5ml ₹270, 8ml ₹400, 10ml ₹500
+    French Avenue Aromatix Naughty Dates   [e Sheets p5]
+        3ml ₹180, 5ml ₹270, 8ml ₹400, 10ml ₹500
+    French Avenue Irida Extrait   [e Sheets p5]
+        3ml ₹150, 5ml ₹210, 8ml ₹320, 10ml ₹390
+    French Avenue Moonstone Bleu   [e Sheets p5]
+        3ml ₹140, 5ml ₹200, 8ml ₹280, 10ml ₹360
+    French Avenue Ravine Ice   [e Sheets p5]
+        3ml ₹190, 5ml ₹280, 8ml ₹420, 10ml ₹530
+    French Avenue Ravine Ginger   [e Sheets p5]
+        3ml ₹190, 5ml ₹280, 8ml ₹420, 10ml ₹530
+    French Avenue Vulcan Black Friday   [e Sheets p5]
+        3ml ₹170, 5ml ₹240
+    French Avenue Pinnace White   [e Sheets p5]
+        3ml ₹150, 5ml ₹210, 8ml ₹310, 10ml ₹390, 20ml ₹700, 30ml ₹950
+    French Avenue Opus magnum   [e Sheets p5]
+        3ml ₹180, 5ml ₹260, 8ml ₹380, 10ml ₹470
+    French Avenue Amber Empire   [e Sheets p5]
+        3ml ₹160, 5ml ₹230, 8ml ₹340, 10ml ₹430
+    Khadlaj Gaith   [e Sheets p6]
+        5ml ₹140
+    Khadlaj Pure Musk Blend   [e Sheets p6]
+        3ml ₹230, 5ml ₹330, 8ml ₹500, 10ml ₹620, 20ml ₹1080, 30ml ₹1540
+    Khadlaj Icon   [e Sheets p6]
+        3ml ₹150, 5ml ₹210, 8ml ₹310, 10ml ₹390, 20ml ₹700, 30ml ₹950
+    Khadlaj Azure Velvet   [e Sheets p6]
+        3ml ₹120, 5ml ₹160, 8ml ₹230, 10ml ₹290, 20ml ₹520, 30ml ₹670
+    Lattafa Al Nashama Caprice   [e Sheets p6]
+        3ml ₹140, 5ml ₹190, 8ml ₹270, 10ml ₹340, 20ml ₹600, 30ml ₹850
+    Lattafa His Confession   [e Sheets p6]
+        3ml ₹150, 5ml ₹210, 8ml ₹310, 10ml ₹390, 20ml ₹700, 30ml ₹950
+    Lattafa Art of Universe   [e Sheets p6]
+        3ml ₹180, 5ml ₹260, 8ml ₹380, 10ml ₹480, 20ml ₹880
+    Lattafa Najdia Intense   [e Sheets p6]
+        3ml ₹120, 5ml ₹160, 8ml ₹240, 10ml ₹310
+
+  --- 3. Full-bottle sheet vs catalog ----------------------------
+  These are BNIB bottles, a separate list from the decants. A row
+  here with no catalog match usually just means that product is
+  not sold as a decant, which is not an error.
+  Full-bottle rows on the sheet  : 673
+  Matched to a catalog entry     : 278
+  Full-bottle PRICE MISMATCH     : 27
+  No decant equivalent           : 395
+
+  Full-bottle price mismatches (showing 27 of 27):
+    AJMAL CYAN OUD                                      100ml_full  sheet ₹1700  catalog ₹1300
+    AL HARAMAIN DETOUR EXCLSIF NOIR EDP                 100ml_full  sheet ₹2000  catalog —
+    ARMAF CLUB DE NUIT ICONIC EDP                       105ml_full  sheet ₹3500  catalog —
+    ARMAF CLUB DE NUIT ICONIC EDP                       200ml_full  sheet ₹5500  catalog —
+    ARMAF CLUB DE NUIT INTENS MAN                       105ml_full  sheet ₹2900  catalog —
+    ARMAF CLUB DE NUIT INTENSE MAN EDP                  200ml_full  sheet ₹4300  catalog ₹5500
+    ARMAF CLUB DE NUIT PRECIEUX 4 EDP                    55ml_full  sheet ₹3800  catalog ₹4100
+    ARMAF CLUB DE NUIT SILLAGE EDP                      105ml_full  sheet ₹3300  catalog —
+    ARMAF CLUB DE NUIT SILLAGE EDP                      250ml_full  sheet ₹5500  catalog —
+    ARMAF CLUB DE NUIT UNTOLD EDP                       105ml_full  sheet ₹3500  catalog —
+    FW/FRENCH AVENUE NUIT EDP                            80ml_full  sheet ₹1700  catalog —
+    KHADLAJ KARUS BLU SPICE EDP                         100ml_full  sheet ₹2100  catalog ₹2200
+    LATTAFA ECLAIRE                                     100ml_full  sheet ₹2350  catalog —
+    LATTAFA HAYAATI GOLD ELIXIR EDP                     100ml_full  sheet ₹1600  catalog ₹2000
+    LATTAFA KHAMRAH QAHWA EDP                           100ml_full  sheet ₹3000  catalog —
+    LATTAFA OPULENT DUBAI                               100ml_full  sheet ₹1600  catalog —
+    MAISON ALHAMBRA BRIGHT PEACH EDP                     80ml_full  sheet ₹1550  catalog —
+    MAISON ALHAMBRA KISMET MAGIC EDP                    100ml_full  sheet ₹1975  catalog —
+    MAISON ALHAMBRA PORTO NEROLI EDP                     80ml_full  sheet ₹1550  catalog —
+    MAISON ASRAR VANILLA VOYAGE                         100ml_full  sheet ₹2700  catalog —
+    NASEEM AQUA                                          80ml_full  sheet ₹1200  catalog ₹1150
+    PARIS CORNER KHAIR EDP                              100ml_full  sheet ₹1500  catalog —
+    RASASI BLUE LADY EDP                                 40ml_full  sheet ₹1100  catalog —
+    ZIMAYA MUSK IS GREAT EDP                            100ml_full  sheet ₹1550  catalog —
+    ZIMAYA TARAF BLACK EDP                              100ml_full  sheet ₹1600  catalog ₹1400
+    ZIMAYA TIRAMISU COCO EDP                            100ml_full  sheet ₹2050  catalog —
+    ZIMAYA TIRAMISU S`MORES EDP                         100ml_full  sheet ₹2250  catalog —
+
+  --- 4. Other ---------------------------------------------------
+  Name spelled differently on sheet vs catalog: 121
+  Catalog entries on no sheet at all         : 181
+
+  Spelling differences (showing 25):
+    sheet: Ahmed Al Maghribi Oud Couture
+    cat:   Oud Couture Ahmed Al Maghribi   (100% similar)
+    sheet: Ahmed Al Maghribi Blue
+    cat:   Ahmed Al Maghribi Blue Oud   (92% similar)
+    sheet: Franck Oliver Oud Touch
+    cat:   Frank Oliver Oud Touch   (98% similar)
+    sheet: Khadlaj Epoque Artistique
+    cat:   KHADLAJ EPOQUE ARTISTIQUE EDP   (93% similar)
+    sheet: Riiffs Imperial Blue
+    cat:   RIFFS IMPERIAL BLUE   (97% similar)
+    sheet: Riiffs Fleurie Violette
+    cat:   RIFFS FLEURIE VIOLETTE   (98% similar)
+    sheet: Riiffs Fareed
+    cat:   RIFFS FAREED   (96% similar)
+    sheet: Gucci Guilty Love Edition Pour Homme
+    cat:   - Guilty Love Edition Pour Homme   (91% similar)
+    sheet: Issey Miyake L'Eau d'Issey Pour Homme EDP
+    cat:   Issey Miyake L'Eau d'Issey Pour Homme   (95% similar)
+    sheet: Issey Miyake L'Eau d'Issey Pour Homme Intense
+    cat:   Issey Miyake L'Eau d'Issey Pour Homme   (90% similar)
+    sheet: Mercedes Club Black EDP
+    cat:   Mercedes Club Black EDT   (96% similar)
+    sheet: Versace Eros EDP
+    cat:   Versace Eros EDT   (94% similar)
+    sheet: Armaf Club De Nuit Maleka
+    cat:   Ajmal Club De Nuit Maleka   (92% similar)
+    sheet: Fragrance World Versus Bright Crystal
+    cat:   Fragrance World Versace Bright Crystal   (93% similar)
+    sheet: Fragrance World Monster Cafe Intense
+    cat:   Fragrance World Montale Cafe intense   (94% similar)
+    sheet: Paris Corner Emir Just Bergamont
+    cat:   Paris Corner Emir Just Bergamot   (98% similar)
+    sheet: Paris Corner Emir Frenetic Delicieuse
+    cat:   Paris Corner Emir Frenetic Deliceuse   (99% similar)
+    sheet: Burberry Her EDP
+    cat:   Burberry Hero EDP   (97% similar)
+    sheet: Burberry Her EDT
+    cat:   Burberry Hero EDP   (91% similar)
+    sheet: Mont Blanc Signature EDP
+    cat:   Her EDP Mont Blanc Signature   (92% similar)
+    sheet: Valentino Donna Born in Roma EDP Intense
+    cat:   Valentino Born in Roma Intense EDP   (92% similar)
+    sheet: AFNAN HISTORIC DORIA EDP
+    cat:   Afnan Historic Doria   (91% similar)
+    sheet: AFNAN HISTORIC SAHARA EDP
+    cat:   Afnan Historic Sahara   (91% similar)
+    sheet: AFNAN SUPREMACY IN OUD EDP
+    cat:   Afnan Supremacy In Oud   (92% similar)
+    sheet: AFNAN SUPREMACY NOT ONLY INTENSE
+    cat:   Afnan Supremacy Not Only Intense(SNOI)   (93% similar)
+
+Wrote catalog_audit.json

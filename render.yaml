@@ -1,0 +1,36 @@
+services:
+  - type: web
+    name: decanter-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: CHATMITRA_API_TOKEN
+        sync: false
+      - key: CHATMITRA_WEBHOOK_SECRET
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: OWNER_EMAIL
+        sync: false
+      # Recall/precision dial for perfume matching — see
+      # app.name_index.MIN_SCORE_DEFAULT. Replaces FUZZY_THRESHOLD, which
+      # tuned a per-keyword string-similarity cutoff that no longer exists.
+      # Lower tolerates more mangled input at the cost of more wrong guesses.
+      - key: MATCH_MIN_SCORE
+        value: "4.0"
+      - key: GROQ_MODEL
+        value: "llama-3.1-8b-instant"
+      - key: MAX_MESSAGE_LENGTH
+        value: "500"
+      - key: DEDUP_TTL_SECONDS
+        value: "300"

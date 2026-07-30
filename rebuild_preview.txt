@@ -1,0 +1,81 @@
+
+============================================================================================
+  CATALOG REBUILD (preview — app/catalog_data.json is untouched)
+============================================================================================
+
+  - Guerlain Mon Guerlain EDP: listed twice on Sovereign Scents - Decant Sheet - Google Sheets2.pdf with different prices (kept p3 {'3ml': 250, '5ml': 370, '8ml': 560, '10ml': 690}, ignored p3 {'3ml': 290, '5ml': 440, '8ml': 670, '10ml': 830})
+  - sheet 1 supplied 1023 products
+  - sheet 2 supplied 178 products sheet 1 does not list
+  - sheet 2 was overruled on 66 products it shares with sheet 1
+  - full-bottle sheet: 241 prices attached to a decant product, 432 full-bottle-only products not carried into the catalog
+  - 160 existing full-bottle prices preserved (the sheet names them differently)
+
+  Current catalog : 1208 entries
+  Rebuilt catalog : 1470 entries
+    products from the sheets      : 1201
+    carried over (on no sheet)    : 269
+
+  NEW products added   : 356
+  PRICE CHANGES        : 156
+  Entries dropped      : 41
+  Superseded wreckage  : 63
+  (superseded = old entries whose real product is in the rebuild under
+   its correct name — merged name+clone, or a lost name like 'Armaf Armaf')
+
+  --- Price changes (showing 6) ---
+    Afnan Rare tiffany
+        was: 3ml 170  5ml 250  8ml 320  10ml 580  20ml 800
+        now: 3ml 130  5ml 170  8ml 250  10ml 320  20ml 580  30ml 800  100ml_full 2700
+    Afnan Supremacy In Oud
+        was: 3ml 150  5ml 200  8ml 320  10ml 400  20ml 950  100ml_full 3600
+        now: 3ml 150  5ml 200  8ml 320  10ml 400  30ml 950  100ml_full 3600
+    Afnan Supremacy Incense
+        was: 3ml 150  5ml 200  8ml 320  10ml 400  20ml 1150
+        now: 3ml 150  5ml 200  8ml 320  10ml 400  30ml 1150
+    Afnan Supremacy Noir
+        was: 3ml 140  5ml 190  8ml 280  10ml 350  20ml 950
+        now: 3ml 140  5ml 190  8ml 280  10ml 350  30ml 950
+    Ahmed Al Maghribi Rose Noir
+        was: 3ml 210  5ml 320  8ml 380  10ml 760  20ml 1080  30ml 120
+        now: 3ml 160  5ml 230  8ml 340  10ml 430  20ml 760  30ml 1080  75ml_full 2600
+    Ajmal Cyan Oud
+        was: 3ml 120  5ml 150  8ml 220  10ml 280  100ml_full 1300
+        now: 3ml 120  5ml 150  8ml 220  10ml 280  100ml_full 1700
+
+  --- New products (showing 6) ---
+    Afnan Cherry Bouquet                                 3ml 190  5ml 260  8ml 400  10ml 490  20ml 940  30ml 1340  100ml_full 3300
+    Afnan Delicious Bouquet                              3ml 190  5ml 260  8ml 400  10ml 490  20ml 940  30ml 1340  80ml_full 3300
+    Afnan Mystique Bouquet                               3ml 190  5ml 260  8ml 400  10ml 490  20ml 940  30ml 1340  80ml_full 3300
+    Afnan Rare Carbon                                    3ml 150  5ml 210  8ml 300  10ml 380  20ml 680  30ml 920  100ml_full 2650
+    Afnan Rare Reef                                      3ml 150  5ml 210  8ml 300  10ml 380  20ml 680  30ml 920  100ml_full 2650
+    Afnan Supremacy Collector's Edition                  3ml 170  5ml 250  8ml 370  10ml 470  20ml 860  30ml 1190
+
+  --- Dropped (showing 6) ---
+    - Aramis EDT                                         3ml 130  5ml 170  8ml 240  10ml 320
+    - Guilty Love Edition Pour Homme                     3ml 260  5ml 420  8ml 620  10ml 780
+    ARABIYAT NYLA SUEDE EDP                              100ml_full 1875
+    Acqua Di Gio Profondo EDP 5% NA                      3ml 300  5ml 450  8ml 700  10ml 850
+    Ajmal Club De Nuit Maleka                            3ml 160  5ml 230  8ml 350  10ml 430
+    Albait Niche Albait Niche                            3ml 150  5ml 200  8ml 300  10ml 380  20ml 680  30ml 940
+
+  --- Superseded by a correctly-named entry (showing 6 of 63) ---
+    - Aramis EDT                                   -> Aramis Aramis EDT
+    - Guilty Love Edition Pour Homme               -> Gucci Guilty Love Edition Pour Homme
+    ARABIYAT NYLA SUEDE EDP                        -> Arabiyat Prestige Nyla Suede
+    Acqua Di Gio Profondo EDP 5% NA                -> Giorgio Armani Acqua Di Gio Profondo EDP
+    Ajmal Club De Nuit Maleka                      -> Armaf Club De Nuit Maleka
+    Albait Niche Albait Niche                      -> Albait Niche Elysium Pour Homme
+
+  --- Kept although on no sheet (269) ---
+  Confirm these are still sold, or remove them from the sheet-rebuilt file.
+    , 5% NA                                              3ml 300  5ml 450  8ml 700  10ml 850
+    5% NA Imperial Valley                                3ml 240  5ml 360  8ml 550  10ml 670  20ml 1180  30ml 1690
+    5% NA Issey Miyake                                   3ml 250  5ml 370  8ml 570  10ml 700  20ml 1240
+    AFNAN TRIBUTE EDP                                    100ml_full 3300
+    AHL Twist on Marj                                    3ml 240  5ml 360  8ml 540  10ml 680  20ml 1300
+    AHMED AHL EDP                                        60ml_full 3500
+
+  Wrote app/catalog_data.rebuilt.json
+  Nothing is live yet. To adopt it:
+      cp app/catalog_data.rebuilt.json app/catalog_data.json
+
