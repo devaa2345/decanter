@@ -122,7 +122,7 @@ WELCOME_MESSAGE = (
 # for — the known cases (the "9pm" family, a catalog keyword collision, a
 # customer naming a few products at once) are always a handful, but this
 # guards against ever dumping an unreadably long message.
-_MAX_MULTI_CANDIDATES = 8
+_MAX_MULTI_CANDIDATES = 30
 
 
 def _format_price(price: int) -> str:
@@ -311,6 +311,7 @@ def build_multi_price_card(
     opening: str | None = None,
     closing: str | None = None,
     requested_ml: int | None = None,
+    sizes: dict[str, int] | None = None,
 ) -> str:
     """
     Reply for 2+ perfumes found in one message — used both when the
@@ -343,20 +344,28 @@ def build_multi_price_card(
     if not perfume_ids:
         return AMBIGUOUS_MESSAGE
 
-    shown = perfume_ids[:_MAX_MULTI_CANDIDATES]
-    perfumes = [PERFUMES[pid] for pid in shown if pid in PERFUMES]
+    shown = [pid for pid in perfume_ids[:_MAX_MULTI_CANDIDATES] if pid in PERFUMES]
+    perfumes = [PERFUMES[pid] for pid in shown]
     if not perfumes:
         return AMBIGUOUS_MESSAGE
 
+    # Each product can have its OWN size. "9pm rebel 3ml, khamrah 5ml, kaaf
+    # 10ml" is one order with three different sizes, and quoting the first
+    # size for all of them was two wrong prices — see
+    # app.matcher.sizes_per_perfume. requested_ml remains the fallback for
+    # every product the customer did not size individually.
+    sizes = sizes or {}
     priced: list[tuple[dict, str]] = []
-    unavailable: list[dict] = []
-    if requested_ml:
-        for perfume in perfumes:
-            size_key = _resolve_size_key(perfume["prices"], requested_ml)
-            if size_key:
-                priced.append((perfume, size_key))
-            else:
-                unavailable.append(perfume)
+    unavailable: list[tuple[dict, int]] = []
+    for pid, perfume in zip(shown, perfumes):
+        wanted = sizes.get(pid, requested_ml)
+        if not wanted:
+            continue
+        size_key = _resolve_size_key(perfume["prices"], wanted)
+        if size_key:
+            priced.append((perfume, size_key))
+        else:
+            unavailable.append((perfume, wanted))
 
     lines = []
     if opening:
@@ -368,10 +377,10 @@ def build_multi_price_card(
             f"{p['display_name'].upper()} - {_size_display_label(sk)}  {_format_price(p['prices'][sk])}"
             for p, sk in priced
         ]
-        for p in unavailable:
+        for p, wanted in unavailable:
             available = ", ".join(_size_display_label(k) for k in p["prices"])
             item_lines.append(
-                f"{p['display_name'].upper()} - not available in {requested_ml}ml (has: {available})"
+                f"{p['display_name'].upper()} - not available in {wanted}ml (has: {available})"
             )
 
         divider = "-" * min(max(max(len(line) for line in item_lines), 12), 40)

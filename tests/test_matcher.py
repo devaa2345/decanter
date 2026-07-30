@@ -22,6 +22,7 @@ from app import conversation
 from app.catalog import PERFUMES
 from app.groq_client import GroqClassification
 from app.matcher import (
+    sizes_per_perfume,
     MatchResult,
     _looks_like_explicit_request,
     extract_requested_size_ml,
@@ -325,9 +326,11 @@ class TestGroqUnavailable:
         Nothing is keyed off single generic words any more."""
         with groq_unreachable():
             result = run(match_perfume("i want to confirm kaaf only"))
-        assert result.perfume_id is not None
-        assert "kaaf" in PERFUMES[result.perfume_id]["display_name"].lower()
-        assert result.ambiguous is False
+        found = [
+            PERFUMES[p]["display_name"].lower() for p in ids(result)
+        ]
+        assert found, "the customer named a product and is confirming an order"
+        assert all("kaaf" in n for n in found), found
 
     def test_filler_words_in_a_long_sentence_do_not_become_a_product(self):
         """Reported live: a customer asked about a perfume the catalog did
@@ -522,7 +525,7 @@ class TestContextDoesNotAnswerForAProductWeDoNotHave:
         # and nothing lists it as a clone_of. A name the catalog DOES have
         # never reaches this code path at all: the index resolves it.
         "message",
-        ["penhalgions endymon", "penhaligons endymion", "serge lutens chergui", "zoologist squid"],
+        ["penhalgions endymon", "penhaligons endymion", "zoologist squid", "jo malone english pear"],
     )
     def test_an_unrecognised_name_is_not_resolved_from_context(self, message):
         with groq_picks_first():
@@ -540,3 +543,138 @@ class TestContextDoesNotAnswerForAProductWeDoNotHave:
         with groq_picks_first():
             result = run(match_perfume(message, history=self._history()))
         assert ids(result), f"{message!r} should have resolved from context"
+
+
+class TestWishlistIsAnAsk:
+    """
+    A pasted shopping list must be answered. Reported live: a customer sent
+    sixteen perfumes across four brands and got silence, while Groq's own
+    reply named three of the products it had just recognised and still set
+    explicit_ask=false.
+    """
+
+    WISHLIST = (
+        "Al Haramain: - Detour Noir - Detour Eco - Detour Intense Noir - Amber Ruby "
+        "Edition  Armaf: - Club de Nuit Intense Man EDP - Club de Nuit Untold  "
+        "French Avenue: - Liquid Brun - Cocoa Morado - Aether Extrait  Maison "
+        "Alhambra: - Tobacco Touch - Woody Oud - Opulence Leather - Porto Neroli - "
+        "Toscano Leather - Fabulo Intense - Black Origami"
+    )
+
+    def setup_method(self):
+        conversation.clear()
+
+    def test_answered_even_when_groq_calls_it_not_an_ask(self):
+        with groq(perfume_ids=[], explicit_ask=False):
+            result = run(match_perfume(self.WISHLIST))
+        assert len(ids(result)) >= 4
+
+    def test_answered_when_groq_is_unavailable(self):
+        with groq_unreachable():
+            result = run(match_perfume(self.WISHLIST))
+        assert len(ids(result)) >= 4
+
+    def test_groq_sees_every_candidate_the_index_found(self):
+        """A tighter shortlist truncated the list: eight products were found
+        and six were offered, so two could not be answered whatever Groq
+        replied."""
+        found = {s.perfume_id for s in search(self.WISHLIST)}
+        with patch(
+            CLASSIFY, new_callable=AsyncMock, return_value=GroqClassification()
+        ) as mock:
+            run(match_perfume(self.WISHLIST))
+        assert set(mock.call_args.kwargs["candidates"]) == found
+
+    def test_two_names_in_passing_are_still_not_an_ask(self):
+        """The list rule keys on the message being mostly product names, so
+        a remark that happens to name two perfumes stays silent."""
+        with groq(perfume_ids=[], explicit_ask=False):
+            result = run(match_perfume("my friend uses sauvage and eros and loves them"))
+        assert ids(result) == []
+
+    def test_a_declined_list_stays_silent(self):
+        with groq(perfume_ids=[], explicit_ask=False):
+            result = run(match_perfume("i dont want detour noir or cocoa morado"))
+        assert ids(result) == []
+
+
+class TestPerPerfumeSizes:
+    """
+    Reported live: a customer ordering several decants sized them
+    individually — "3ml for the first one, 5ml for the second" — and got the
+    FIRST size quoted for every product. On a three-item order that is two
+    wrong prices, on an order the customer is about to pay for.
+
+    A size belongs to the name it was written next to.
+    """
+
+    def setup_method(self):
+        conversation.clear()
+
+    def _sizes(self, message):
+        return sizes_per_perfume(message, search(message))
+
+    def _named(self, message):
+        return {
+            PERFUMES[pid]["display_name"]: ml
+            for pid, ml in self._sizes(message).items()
+        }
+
+    def test_each_product_gets_its_own_size(self):
+        got = self._named("9pm rebel 3ml, kaaf 10ml")
+        assert got["Afnan 9PM Rebel"] == 3
+        assert got["Ahmed Al Maghribi Kaaf"] == 10
+
+    def test_three_different_sizes(self):
+        got = self._named("9pm rebel 3ml, khamrah 5ml, kaaf 10ml")
+        assert got["Afnan 9PM Rebel"] == 3
+        assert got["Lattafa Khamrah"] == 5
+        assert got["Ahmed Al Maghribi Kaaf"] == 10
+
+    def test_one_size_for_the_whole_order_still_applies_to_all(self):
+        got = self._named("9pm rebel and kaaf 5ml")
+        assert set(got.values()) == {5}
+
+    def test_a_size_written_before_the_names_still_applies(self):
+        """"3ml of X and Y" — the size leads, which the next-size-after rule
+        alone would miss entirely."""
+        got = self._named("3ml of 9pm rebel and kaaf")
+        assert set(got.values()) == {3}
+
+    def test_no_size_mentioned_yields_nothing(self):
+        assert self._sizes("9pm rebel and kaaf") == {}
+
+    def test_sizes_ride_along_on_the_match_result(self):
+        async def fake(message, candidates, history=None):
+            return GroqClassification(perfume_ids=list(candidates), explicit_ask=True)
+
+        with patch(CLASSIFY, new_callable=AsyncMock, side_effect=fake):
+            result = run(match_perfume("9pm rebel 3ml, kaaf 10ml"))
+
+        named = {PERFUMES[p]["display_name"]: ml for p, ml in result.sizes.items()}
+        assert named["Afnan 9PM Rebel"] == 3
+        assert named["Ahmed Al Maghribi Kaaf"] == 10
+
+
+class TestMultiSizeCard:
+    """The reply itself has to show those different sizes, not one of them."""
+
+    def test_card_prices_each_product_at_its_own_size(self):
+        from app.formatter import build_multi_price_card
+
+        rebel = next(p for p, d in PERFUMES.items() if d["display_name"] == "Afnan 9PM Rebel")
+        kaaf = next(p for p, d in PERFUMES.items() if "Kaaf" == d["display_name"].split()[-1])
+        card = build_multi_price_card(
+            [rebel, kaaf], None, None, requested_ml=3, sizes={rebel: 3, kaaf: 10}
+        )
+        assert "3ml" in card and "10ml" in card
+        expected = PERFUMES[rebel]["prices"]["3ml"] + PERFUMES[kaaf]["prices"]["10ml"]
+        assert f"{expected:,}" in card
+
+    def test_a_product_without_its_own_size_falls_back(self):
+        from app.formatter import build_multi_price_card
+
+        rebel = next(p for p, d in PERFUMES.items() if d["display_name"] == "Afnan 9PM Rebel")
+        kaaf = next(p for p, d in PERFUMES.items() if "Kaaf" == d["display_name"].split()[-1])
+        card = build_multi_price_card([rebel, kaaf], None, None, requested_ml=5, sizes={rebel: 3})
+        assert "3ml" in card and "5ml" in card

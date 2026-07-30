@@ -11,6 +11,7 @@ Verifies card output matches expected format:
 import pytest
 
 from app.formatter import (
+    _MAX_MULTI_CANDIDATES,
     AMBIGUOUS_MESSAGE,
     CATALOG_SHEET_URL,
     FALLBACK_MESSAGE,
@@ -197,10 +198,10 @@ class TestBuildMultiPriceCard:
         assert build_multi_price_card([]) == AMBIGUOUS_MESSAGE
 
     def test_truncates_beyond_the_cap_with_a_count(self):
-        many_pids = list(PERFUMES)[:15]
+        many_pids = list(PERFUMES)[: _MAX_MULTI_CANDIDATES + 5]
         card = build_multi_price_card(many_pids)
         assert "more" in card.lower()
-        # Only the capped number of names should actually appear, not all 15
+        # Only the capped number of names should appear, not every one
         shown_names = sum(
             1 for pid in many_pids if PERFUMES[pid]["display_name"].upper() in card
         )

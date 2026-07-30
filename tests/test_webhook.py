@@ -446,7 +446,7 @@ class TestWebhookHandler:
 
     @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
     def test_requested_size_shows_only_that_variant_with_grand_total(self, mock_send, client):
-        """'kaaf 3ml' must show only the 3ml price, plus delivery cost
+        """'9pm rebel 3ml' must show only the 3ml price, plus delivery cost
         added per region with the grand total shown alongside it — not the
         full size grid. classify_and_phrase returning an empty (not None)
         GroqClassification simulates Groq having genuinely run and found
@@ -457,17 +457,17 @@ class TestWebhookHandler:
             new_callable=AsyncMock,
             return_value=GroqClassification(),
         ):
-            payload = _make_webhook_payload("kaaf 3ml")
+            payload = _make_webhook_payload("9pm rebel 3ml")
             response = client.post("/webhook", json=payload)
         assert response.status_code == 200
         reply_text = mock_send.call_args[0][1]
-        assert "AHMED AL MAGHRIBI KAAF" in reply_text.upper()
-        assert "3ml  ₹130" in reply_text
-        assert "₹180" not in reply_text  # 5ml price must not appear
+        assert "AFNAN 9PM REBEL" in reply_text.upper()
+        assert "3ml  ₹160" in reply_text
+        assert "₹220" not in reply_text  # 5ml price must not appear
         assert "Delivery + grand total:" in reply_text
-        assert "₹65 - Delhi NCR - Total ₹195" in reply_text
-        assert "₹80 - Rest of India - Total ₹210" in reply_text
-        assert "₹100 - J&K, NE, Lakshadweep & Andaman - Total ₹230" in reply_text
+        assert "₹65 - Delhi NCR - Total ₹225" in reply_text
+        assert "₹80 - Rest of India - Total ₹240" in reply_text
+        assert "₹100 - J&K, NE, Lakshadweep & Andaman - Total ₹260" in reply_text
 
     @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
     def test_ambiguous_9pm_lists_all_real_candidates(self, mock_send, client):

@@ -84,6 +84,11 @@ class MatchResult:
     llm_unavailable: bool = False
     # Debug/diagnostic view of what the index scored, best first.
     scores: list[tuple[str, float]] = field(default_factory=list)
+    # perfume_id -> the ml size the customer asked for THAT product, when
+    # they sized products individually ("9pm rebel 3ml, khamrah 5ml"). Only
+    # the matcher knows where each name sat in the message, so only it can
+    # work this out — see sizes_per_perfume.
+    sizes: dict[str, int] = field(default_factory=dict)
 
 
 # --- Message normalization --------------------------------------------------
@@ -113,6 +118,58 @@ def extract_requested_size_ml(normalized: str) -> int | None:
     """
     match = _ML_SIZE_PATTERN.search(normalized)
     return int(match.group(1)) if match else None
+
+
+def sizes_per_perfume(
+    message_text: str, results: "list[name_index.Scored]"
+) -> dict[str, int]:
+    """
+    Which decant size the customer asked for, PER perfume.
+
+    "9pm rebel 3ml, khamrah 5ml, kaaf 10ml" is three different sizes, and
+    reading a single size for the whole message quoted 3ml for all three —
+    two wrong prices on one order. Each product takes the size written
+    immediately after its name, which is how people write these lists.
+
+    A size written before the names instead ("3ml of sauvage and eros") is
+    picked up by the fallback, and a message with one size and several
+    products still gives that size to all of them.
+    """
+    _tokens, sizes = name_index.tokenize_message_with_sizes(message_text)
+    if not sizes or not results:
+        return {}
+
+    placed = [s for s in results if s.consumed]
+    if not placed:
+        return {}
+
+    # Which side of the name the size is written on is a property of the
+    # whole message, not of each product, and both conventions are common:
+    #
+    #     "9pm rebel 3ml, kaaf 10ml"          size trails the name
+    #     "10ML - Zenith Deep / 5ML - Khair"  size leads it
+    #
+    # Deciding per product cannot work — in the first message the "3ml" sits
+    # immediately before "kaaf" as well as after "rebel". Whether the very
+    # first size appears before or after the first product name settles it
+    # for the message.
+    first_name = min(min(s.consumed) for s in placed)
+    leads = sizes[0][0] <= first_name
+
+    per_perfume: dict[str, int] = {}
+    for scored in placed:
+        start, end = min(scored.consumed), max(scored.consumed)
+        if leads:
+            candidates = [(pos, ml) for pos, ml in sizes if pos <= start]
+            chosen = max(candidates) if candidates else min(sizes)
+        else:
+            candidates = [(pos, ml) for pos, ml in sizes if pos > end]
+            chosen = min(candidates) if candidates else max(
+                [(pos, ml) for pos, ml in sizes if pos <= end] or sizes
+            )
+        per_perfume[scored.perfume_id] = chosen[1]
+
+    return per_perfume
 
 
 # --- Intent: is this an ask, or just a mention? -----------------------------
@@ -162,8 +219,14 @@ _NAME_FOCUS_THRESHOLD = 0.6
 _BARE_NAME_FOCUS = 0.9
 _BARE_NAME_COVERAGE = 0.9
 
+# How many fully-spelled product names make a message a shopping list rather
+# than a remark that happens to name something.
+_LIST_MIN_NAMES = 2
 
-def _looks_like_explicit_request(text: str, focus: float) -> bool:
+
+def _looks_like_explicit_request(
+    text: str, focus: float, name_words: frozenset[str] = frozenset()
+) -> bool:
     """
     Deterministic stand-in for Groq's intent judgment, used when Groq is
     unavailable. `focus` is how much of the message the matched name
@@ -172,13 +235,25 @@ def _looks_like_explicit_request(text: str, focus: float) -> bool:
     Negation is checked first and overrides everything: erring toward
     silence is the safer failure mode for a coarse fallback.
     """
-    tokens = set(name_index.tokenize_message(text))
-    if not tokens:
+    all_tokens = name_index.tokenize_message(text)
+    if not all_tokens:
         return False
-    if tokens & _NEGATION_MARKERS:
+
+    # A negation word that is part of a product's OWN name is not a
+    # negation. "Chanel No 5" contains "no" and "Supremacy Not Only Intense"
+    # contains "not" — both were reading as refusals, so a customer listing
+    # either got total silence.
+    #
+    # Checked against DISPLAY NAMES only, never clone_of. Exempting anything
+    # a match merely consumed was too loose: "the 9pm rebel is good but I
+    # don't want it" pulled in Maison Asrar Love Key, whose clone_of is
+    # "Kilian's Love, Don't Be Shy", and that stray "don't" switched the
+    # decline guard off entirely.
+    if any(t in _NEGATION_MARKERS and t not in name_words for t in all_tokens):
         return False
     if focus >= _NAME_FOCUS_THRESHOLD:
         return True
+
     words = set(normalize_message(text).split())
     # A bare size ("10ml") is a request cue on its own, and arrives as one
     # token rather than a word from the list above.
@@ -219,10 +294,17 @@ def _clean_match(scored: name_index.Scored) -> bool:
 
 # --- Groq refinement --------------------------------------------------------
 
-# How many index candidates Groq is asked to choose between. The index is
-# precise enough that a real answer is essentially always in the top few;
-# beyond that the prompt only gets longer and the model more suggestible.
-_LLM_CANDIDATE_LIMIT = 6
+# How many index candidates Groq is asked to choose between — everything the
+# index found, since it already caps itself at name_index.MAX_RESULTS. A
+# tighter limit here silently truncated multi-product messages: a customer's
+# wishlist resolved to eight perfumes and Groq was shown six of them, so two
+# of the products they asked for could not be answered whatever it replied.
+_LLM_CANDIDATE_LIMIT = name_index.MAX_RESULTS
+
+# How many distinct message spans make a message a LIST of products rather
+# than one ambiguous name. Three keeps genuine two-way ambiguity in Groq's
+# hands while protecting real multi-item orders.
+_LIST_DISTINCT_SPANS = 3
 
 
 async def _refine_with_llm(
@@ -263,6 +345,27 @@ async def _refine_with_llm(
         return None, True, None, None
 
     valid = [pid for pid in result.perfume_ids if pid in shortlist]
+
+    # Groq narrows; that is useful when one NAME fits several products (a
+    # bare "sauvage"), and harmful when the customer listed several
+    # different products. Asked to pick from a sixteen-item order it
+    # quietly returned a subset, and the missing perfumes were simply not
+    # answered.
+    #
+    # The two cases are told apart by what the matches rest on: a family
+    # all rests on the same words, a list rests on different ones. When the
+    # message is a list, Groq's verdict on INTENT still counts — an empty
+    # answer still silences the reply — but it does not get to drop items.
+    spans = {s.consumed for s in candidates}
+    if valid and len(spans) >= _LIST_DISTINCT_SPANS:
+        listed = [s.perfume_id for s in candidates]
+        if len(listed) > len(valid):
+            logger.info(
+                "Groq returned %d of %d listed products — keeping the full list",
+                len(valid), len(listed),
+            )
+        return listed, False, result.opening, result.closing
+
     return valid, False, result.opening, result.closing
 
 
@@ -276,8 +379,14 @@ def _result_from(
     closing: str | None = None,
     llm_unavailable: bool = False,
     all_scores: list[name_index.Scored] | None = None,
+    message_text: str = "",
 ) -> MatchResult:
     scores = [(s.perfume_id, round(s.score, 2)) for s in (all_scores or [])]
+    # Worked out here because only the index knows where each name sat in
+    # the message, and that position is what pairs a name with its size.
+    sizes = sizes_per_perfume(
+        message_text, [scored_by_pid[p] for p in picked if p in scored_by_pid]
+    )
 
     if len(picked) == 1:
         s = scored_by_pid.get(picked[0])
@@ -290,6 +399,7 @@ def _result_from(
             closing=closing,
             llm_unavailable=llm_unavailable,
             scores=scores,
+            sizes=sizes,
         )
 
     top = scored_by_pid.get(picked[0]) if picked else None
@@ -302,6 +412,7 @@ def _result_from(
         closing=closing,
         llm_unavailable=llm_unavailable,
         scores=scores,
+        sizes=sizes,
     )
 
 
@@ -331,6 +442,12 @@ async def match_perfume(
 
     scored_by_pid = {s.perfume_id: s for s in candidates}
     focus = name_index.message_focus(message_text, candidates)
+    name_words = frozenset(
+        w
+        for c in candidates
+        for w in name_index.tokenize(PERFUMES[c.perfume_id]["display_name"])
+        if c.perfume_id in PERFUMES
+    )
 
     picked, llm_unavailable, opening, closing = await _refine_with_llm(
         message_text, candidates, history
@@ -339,7 +456,7 @@ async def match_perfume(
     if picked is None:
         # Groq unreachable — the index result stands, gated by the coarse
         # deterministic intent check.
-        if not _looks_like_explicit_request(message_text, focus):
+        if not _looks_like_explicit_request(message_text, focus, name_words):
             logger.info(
                 "Index matched %s but message reads as a mention, not an ask: %s",
                 [s.perfume_id for s in candidates],
@@ -351,7 +468,8 @@ async def match_perfume(
         layer = "exact" if all(_clean_match(scored_by_pid[p]) for p in ids) else "fuzzy"
         logger.info("Deterministic match (Groq unavailable): %s", ids)
         return _result_from(
-            ids, scored_by_pid, layer, llm_unavailable=True, all_scores=candidates
+            ids, scored_by_pid, layer, llm_unavailable=True, all_scores=candidates,
+            message_text=message_text
         )
 
     if not picked:
@@ -377,10 +495,25 @@ async def match_perfume(
         # message essentially nothing but a product name the customer typed
         # in full, with no negation anywhere? How many products that name
         # happens to fit says nothing about whether they were asking.
-        if (
-            candidates[0].coverage >= _BARE_NAME_COVERAGE
-            and focus >= _BARE_NAME_FOCUS
-            and _looks_like_explicit_request(message_text, focus)
+        #
+        # The same verdict comes back for a pasted WISHLIST, which is the
+        # other shape customers send constantly — "Al Haramain: Detour Noir,
+        # Detour Eco... Armaf: Club de Nuit Untold..." was answered with
+        # silence while Groq itself listed three of the products it had just
+        # recognised. Somebody who writes out several complete product names
+        # is ordering, not chatting.
+        #
+        # Two fully-spelled names is the discriminator, not the count of
+        # candidates: a passing mention produces one ("the owner told me
+        # sauvage is nice"), and "my friend uses sauvage and eros" produces
+        # two but leaves most of the message unexplained, so the focus gate
+        # inside _looks_like_explicit_request still turns it down.
+        fully_named = [c for c in candidates if c.coverage >= _BARE_NAME_COVERAGE]
+        looks_like_a_list = len(fully_named) >= _LIST_MIN_NAMES
+
+        if _looks_like_explicit_request(message_text, focus, name_words) and (
+            looks_like_a_list
+            or (candidates[0].coverage >= _BARE_NAME_COVERAGE and focus >= _BARE_NAME_FOCUS)
         ):
             logger.info(
                 "Groq said not-an-ask, but %r is a bare product name — replying anyway",
@@ -388,7 +521,9 @@ async def match_perfume(
             )
             ids = [s.perfume_id for s in candidates]
             layer = "exact" if all(_clean_match(s) for s in candidates) else "fuzzy"
-            return _result_from(ids, scored_by_pid, layer, all_scores=candidates)
+            return _result_from(
+                ids, scored_by_pid, layer, all_scores=candidates, message_text=message_text
+            )
 
         logger.info(
             "Index matched %s but Groq judged this not an ask: %s",
@@ -409,7 +544,8 @@ async def match_perfume(
 
     logger.info("Match: %s (layer=%s)", picked, layer)
     return _result_from(
-        picked, scored_by_pid, layer, opening, closing, all_scores=candidates
+        picked, scored_by_pid, layer, opening, closing,
+        all_scores=candidates, message_text=message_text,
     )
 
 

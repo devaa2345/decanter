@@ -505,11 +505,21 @@ async def webhook_handler(request: Request):
     # the full size grid. Parsed independently of which layer matched the
     # perfume(s), so it applies the same way whether Groq or the
     # deterministic fallback found the match.
+    #
+    # sizes: a customer ordering several decants sizes them individually
+    # ("9pm rebel 3ml, khamrah 5ml, kaaf 10ml"). Each product takes the size
+    # written next to its own name; requested_ml stays the fallback for any
+    # product they did not size — see app.matcher.sizes_per_perfume.
     requested_ml = extract_requested_size_ml(normalize_message(message_text))
+    sizes = result.sizes
 
     if result.matched_perfume_ids:
         reply_text = build_multi_price_card(
-            result.matched_perfume_ids, result.opening, result.closing, requested_ml=requested_ml
+            result.matched_perfume_ids,
+            result.opening,
+            result.closing,
+            requested_ml=requested_ml,
+            sizes=sizes,
         )
     elif result.perfume_id:
         reply_text = build_price_card(

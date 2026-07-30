@@ -1,0 +1,203 @@
+Products listed on more than one sheet with DIFFERENT prices.
+The men's/unisex sheet wins (larger and more recently priced).
+
+Ibraheem AlQurashi French Tobacco
+    kept   : 3ml 170  5ml 250  8ml 370  10ml 460
+    ignored (Decant Sheet Men-UNISEX): 3ml 150  5ml 200  8ml 300  10ml 380  20ml 700  30ml 950
+
+Paris Corner Emir Celestial
+    kept   : 5ml 140  8ml 200  10ml 270
+    ignored (Decant Sheet Men-UNISEX): 3ml 130  5ml 190  8ml 270  10ml 340
+
+Bvlgari Glacial Essence
+    kept   : 3ml 250  5ml 390  8ml 610  10ml 740
+    ignored (Decant Sheet Men-UNISEX): 3ml 290  5ml 430  8ml 670  10ml 820
+
+Hugo Boss Boss Bottled Absolu
+    kept   : 3ml 250  5ml 380  8ml 600  10ml 750  20ml 1400  30ml 2100
+    ignored (Decant Sheet Men-UNISEX): 3ml 340  5ml 520  8ml 810  10ml 1000
+
+Paco Rabanne Pure XS
+    kept   : 3ml 160  5ml 240  8ml 380  10ml 480
+    ignored (Decant Sheet Men-UNISEX): 3ml 200  5ml 290  8ml 450  10ml 550  20ml 940  30ml 1330
+
+Ahmed Al Maghribi AHL
+    kept   : 3ml 240  5ml 360  8ml 540  10ml 680  20ml 1300
+    ignored (For Women): 3ml 240  5ml 360  8ml 540  10ml 680  20ml 1300  30ml 1850
+
+Ahmed Al Maghribi Azure Royal
+    kept   : 3ml 130  5ml 180  8ml 260  10ml 330  20ml 580
+    ignored (For Women): 5ml 150  8ml 220  10ml 280  20ml 520  30ml 750
+
+Ahmed Al Maghribi Summer Oud
+    kept   : 3ml 210  5ml 310  8ml 470  10ml 590  20ml 1080  30ml 1580
+    ignored (For Women): 3ml 190  5ml 290  8ml 440  10ml 560  20ml 1080  30ml 1580
+
+Ahmed Al Maghribi Ignite Oud
+    kept   : 3ml 230  5ml 350  8ml 520  10ml 660  20ml 1220  30ml 1730
+    ignored (For Women): 3ml 190  5ml 290  8ml 440  10ml 560  20ml 1080  30ml 1580
+
+Ahmed Al Maghribi Rose Noir
+    kept   : 3ml 160  5ml 230  8ml 340  10ml 430  20ml 760  30ml 1080
+    ignored (For Women): 5ml 210  8ml 320  10ml 380  20ml 760  30ml 1080
+
+Al Wataniah Kayaan Classic
+    kept   : 3ml 140  5ml 190  8ml 280  10ml 350  20ml 580  30ml 800  100ml_full 2150
+    ignored (For Women): 5ml 180  8ml 270  10ml 340  20ml 620  30ml 850
+
+Afnan Delicious Bouquet
+    kept   : 3ml 190  5ml 260  8ml 400  10ml 490  20ml 940  30ml 1340  80ml_full 3250
+    ignored (For Women): 3ml 190  5ml 260  8ml 400  10ml 490
+
+Afnan Cherry Bouquet
+    kept   : 3ml 190  5ml 260  8ml 400  10ml 490  20ml 940  30ml 1340  100ml_full 3250
+    ignored (For Women): 3ml 190  5ml 260  8ml 400  10ml 490
+
+Afnan Mystique Bouquet
+    kept   : 3ml 190  5ml 260  8ml 400  10ml 490  20ml 940  30ml 1340  80ml_full 3250
+    ignored (For Women): 3ml 190  5ml 260  8ml 400  10ml 490
+
+Afnan Rare tiffany
+    kept   : 3ml 130  5ml 170  8ml 250  10ml 320  20ml 580  30ml 800
+    ignored (For Women): 5ml 170  8ml 250  10ml 320  20ml 580  30ml 800
+
+Armaf Odyssey Toffee Coffee
+    kept   : 3ml 130  5ml 170  8ml 240  10ml 300  20ml 540  30ml 700
+    ignored (For Women): 5ml 150  8ml 220  10ml 280  20ml 520  30ml 750
+
+Arabiyat Prestige Safa
+    kept   : 3ml 160  5ml 220  8ml 320  10ml 400  20ml 720  30ml 980
+    ignored (For Women): 3ml 150  5ml 210  8ml 310  10ml 380  20ml 720  30ml 980
+
+Arabiyat Prestige Swar Venin
+    kept   : 3ml 150  5ml 200  8ml 300  10ml 380  20ml 680  30ml 940
+    ignored (For Women): 3ml 150  5ml 200  8ml 300  10ml 380  20ml 680
+
+French Avenue Cocoa Morado
+    kept   : 3ml 150  5ml 210  8ml 310  10ml 390  20ml 720  30ml 980  100ml_full 2850
+    ignored (For Women): 3ml 130  5ml 180  8ml 260  10ml 350  20ml 650  30ml 900
+
+Khadlaj Mocha Latte
+    kept   : 3ml 120  5ml 150  8ml 220  10ml 280  100ml_full 1850
+    ignored (For Women): 5ml 150  8ml 220  10ml 270
+
+Khadlaj Caffe Latte
+    kept   : 3ml 120  5ml 150  8ml 220  10ml 280
+    ignored (For Women): 5ml 150  8ml 220  10ml 270
+
+Lattafa Emeer
+    kept   : 3ml 170  5ml 240  8ml 360  10ml 450  20ml 850  30ml 1170
+    ignored (For Women): 3ml 160  5ml 220  8ml 330  10ml 400  20ml 800  30ml 1200
+
+Lattafa Teriaq Intense
+    kept   : 3ml 150  5ml 210  8ml 310  10ml 390  100ml_full 3000
+    ignored (For Women): 5ml 170  8ml 240  10ml 320
+
+Lattafa Mashrabya
+    kept   : 3ml 130  5ml 170  8ml 240  10ml 320  100ml_full 2250
+    ignored (For Women): 5ml 170  8ml 240  10ml 320  30ml 840
+
+Lattafa Khamrah Qahwa
+    kept   : 3ml 160  5ml 230  8ml 330  10ml 420  20ml 780  30ml 1070  100ml_full 2950
+    ignored (For Women): 5ml 190  8ml 300  10ml 370  20ml 680  30ml 930
+
+Lattafa Khamrah
+    kept   : 3ml 160  5ml 230  8ml 330  10ml 420  20ml 780  30ml 1070  100ml_full 2950
+    ignored (For Women): 5ml 190  8ml 300  10ml 370  20ml 680  30ml 930
+
+Lattafa Nebras
+    kept   : 3ml 140  5ml 190  8ml 300  10ml 370  20ml 700  30ml 970  100ml_full 2710
+    ignored (For Women): 5ml 200  8ml 300  10ml 380  20ml 660  30ml 920
+
+Lattafa Nebras Elixir
+    kept   : 3ml 140  5ml 190  8ml 300  10ml 370  100ml_full 2710
+    ignored (For Women): 5ml 200  8ml 300  10ml 380  20ml 660  30ml 920
+
+Lattafa Jasoor
+    kept   : 3ml 140  5ml 190  8ml 270  10ml 340  20ml 600  100ml_full 2220
+    ignored (For Women): 5ml 180  8ml 250  10ml 340  20ml 640  30ml 860
+
+Maison Alhambra Lovely Cherry
+    kept   : 3ml 130  5ml 180  8ml 250  10ml 310  20ml 580  80ml_full 1670
+    ignored (For Women): 3ml 120  5ml 160  8ml 220  10ml 280  20ml 500
+
+Maison Alhambra Rose Petals
+    kept   : 3ml 130  5ml 180  8ml 250  10ml 310  20ml 580  80ml_full 1680
+    ignored (For Women): 3ml 120  5ml 170  8ml 240  10ml 310  20ml 540  30ml 710
+
+Maison Alhambra Como Moiselle
+    kept   : 5ml 130  8ml 180  10ml 240  30ml 510
+    ignored (For Women): 5ml 150  8ml 200  10ml 280  30ml 570
+
+Maison Alhambra Porto Neroli
+    kept   : 3ml 130  5ml 180  8ml 250  10ml 310  20ml 580  80ml_full 1680
+    ignored (For Women): 3ml 120  5ml 160  8ml 220  10ml 280  20ml 500  30ml 800
+
+Maison Alhambra Bright Peach
+    kept   : 3ml 130  5ml 180  8ml 250  10ml 310  20ml 580  30ml 710  80ml_full 1450
+    ignored (For Women): 3ml 120  5ml 160  8ml 220  10ml 280  20ml 500  30ml 700
+
+Maison Alhambra Como Moiselle
+    kept   : 5ml 130  8ml 180  10ml 240  30ml 510
+    ignored (For Women): 5ml 130  8ml 190  10ml 240  30ml 690
+
+Paris Corner Eternal Coffee
+    kept   : 5ml 130  8ml 190  10ml 240  30ml 550
+    ignored (For Women): 5ml 130  8ml 190  10ml 240  30ml 880
+
+Paris Corner December Vanilla
+    kept   : 5ml 150  8ml 210  10ml 280  30ml 720  85ml_full 1800
+    ignored (For Women): 3ml 120  5ml 170  8ml 240  10ml 310  20ml 540  30ml 710
+
+Paris Corner Emir Cherry Cola
+    kept   : 5ml 150  8ml 210  10ml 280  30ml 759
+    ignored (For Women): 5ml 150  8ml 220  10ml 280
+
+Paris Corner Emir Fire Your Desire
+    kept   : 5ml 130  8ml 190  10ml 240  30ml 769
+    ignored (For Women): 5ml 130  8ml 190  10ml 240
+
+Pendora Scents Enchantment Blue Intense
+    kept   : 5ml 130  8ml 180  10ml 240  20ml 420  30ml 550
+    ignored (For Women): 5ml 130  8ml 190  10ml 240
+
+Rasasi Hawas Pink
+    kept   : 3ml 150  5ml 210  8ml 300  10ml 380  20ml 760  30ml 1000
+    ignored (For Women): 5ml 210  8ml 300  10ml 380
+
+Rasasi Hawas Diva
+    kept   : 3ml 150  5ml 200  8ml 300  10ml 380
+    ignored (For Women): 5ml 180  8ml 260  10ml 340  20ml 620  30ml 860
+
+Zimaya Sharaf Blend
+    kept   : 5ml 150  8ml 220  10ml 280  20ml 520  30ml 740  100ml_full 2000
+    ignored (For Women): 5ml 159  8ml 229  10ml 289
+
+Zimaya Musk Is Great
+    kept   : 3ml 110  5ml 150  8ml 210  10ml 270  20ml 480  100ml_full 1600
+    ignored (For Women): 3ml 110  5ml 150  8ml 210  10ml 270  20ml 480  30ml 610
+
+Zimaya Tiramisu Coco
+    kept   : 3ml 130  5ml 190  8ml 270  10ml 340  20ml 560  30ml 740  100ml_full 2100
+    ignored (For Women): 3ml 130  5ml 180  8ml 250  10ml 310
+
+Zimaya Tiramisu Caramel
+    kept   : 3ml 130  5ml 190  8ml 270  10ml 340  20ml 560  30ml 740  100ml_full 2050
+    ignored (For Women): 3ml 130  5ml 180  8ml 250  10ml 310
+
+Zimaya Tiramisu S'mores
+    kept   : 3ml 130  5ml 190  8ml 270  10ml 340  20ml 560  30ml 740  100ml_full 2300
+    ignored (For Women): 3ml 130  5ml 180  8ml 250  10ml 310
+
+Guerlain Mon Guerlain EDP
+    kept   : 3ml 250  5ml 370  8ml 560  10ml 690
+    ignored (For Women): 3ml 290  5ml 440  8ml 670  10ml 830
+
+Mancera Instant Crush
+    kept   : 3ml 280  5ml 420  8ml 640  10ml 790  20ml 1420  30ml 2050
+    ignored (For Women): 3ml 260  5ml 370  8ml 560  10ml 660
+
+Mancera Cedrat Boise
+    kept   : 3ml 280  5ml 420  8ml 640  10ml 790  20ml 1420  30ml 2050
+    ignored (For Women): 3ml 240  5ml 360  8ml 520  10ml 660
+
