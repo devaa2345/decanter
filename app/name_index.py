@@ -230,6 +230,19 @@ def _worth_an_extra_round(scored: "Scored") -> bool:
 # scattered the width of a whole message was never really said.
 _MAX_NAME_GAP = 5
 
+# ...and how many of the words it is spread across may be REAL words rather
+# than filler. The span rule alone counts "and", "please" and "the" against
+# a name exactly as heavily as another product's name, so a generous span
+# had to be allowed for ordinary phrasing — and that same generosity let a
+# name reach across a list into the next line. In an eight-item order,
+# "ysl libre edp" on one line and "gucci intnse oud" three lines later
+# combined into YSL Libre Intense, taking the "intense" from Gucci's line
+# and pushing the YSL Libre EDP actually written out of the reply.
+#
+# Filler between a name's words is normal ("club de nuit, the intense man
+# one"); another product's name between them is not.
+_MAX_CONTENT_GAP = 2
+
 
 # Words that must never anchor a match on their own. Two groups, both
 # confirmed as real false-positive sources: ordinary English/Hinglish
@@ -257,7 +270,7 @@ _MESSAGE_STOPWORDS: frozenset[str] = frozenset(
     keep kind know
     last let like little long look lot love
     made make many may me mean might mine more most much must my
-    morning afternoon evening
+    morning evening
     name need never new next nice no not now
     of off ok okay old on once one only or order orders other our out over
     own
@@ -358,6 +371,14 @@ _SIZE_RE = re.compile(r"\b\d{1,4}\s*ml\b")
 # name, so no amount of fuzzy tolerance can reach them — the expansion has
 # to be stated. Deliberately short and unambiguous: an abbreviation that
 # could plausibly mean two different products does not belong here.
+#
+# An entry also has to EARN its place by reaching something. "ysl" ->
+# "yves saint laurent" and "mfk" -> "maison francis kurkdjian" were both
+# removed for failing that: the catalog writes those brands as "YSL" and
+# "MFK", so the expansion matched zero names and the only thing it ever did
+# was donate "yves" to Fragrance World Jacques Yves Imaginari — which then
+# rode along on all 55 YSL products' answers. Before adding one, check that
+# the expanded words actually appear in a display name or a clone_of.
 _ALIASES: dict[str, str] = {
     "cdni": "club de nuit intense",
     "cdnim": "club de nuit intense man",
@@ -369,13 +390,10 @@ _ALIASES: dict[str, str] = {
     "svg": "sauvage",
     "sce": "supremacy collectors edition",
     "snoi": "supremacy not only intense",
-    "cdni": "club de nuit intense",
     "tfoud": "tom ford oud wood",
     "lidge": "l immensite",
-    "mfk": "maison francis kurkdjian",
     "br540": "baccarat rouge 540",
     "br": "baccarat rouge",
-    "ysl": "yves saint laurent",
     "ck": "calvin klein",
     "jpg": "jean paul gaultier",
     "ysllb": "yves saint laurent la nuit de l homme",
@@ -392,6 +410,40 @@ def tokenize(text: str) -> list[str]:
     """Lowercase alphanumeric tokens. '&' becomes 'and' first so 'Oud &
     Roses' and 'Oud and Roses' tokenize identically."""
     return _WORD_RE.findall(text.lower().replace("&", " and "))
+
+
+# What separates one item of a list from the next. A customer writing an
+# order presses Enter or types a comma between products and never inside a
+# product's name — no display name in the catalog contains a comma, and none
+# spans a line. Treating these as hard boundaries is what stops a name being
+# assembled out of two different items:
+#
+#     - azzaro pour homme edt
+#     - gucci gorgeous gardenia edp
+#
+# answered with Gucci Gorgeous Gardenia EDT, taking the "edt" off Azzaro's
+# line, and pushed the EDP actually written out of the reply entirely. Same
+# mechanism turned "ysl libre edp" plus a later "gucci intnse oud" into YSL
+# Libre Intense.
+_SEGMENT_BREAK = re.compile(r"[\n\r;,|]+|(?:^|\s)[-*•]\s")
+
+
+def message_segments(text: str) -> list[int]:
+    """
+    One entry per message token: which item of the customer's list it came
+    from. Built by tokenizing each segment separately, so it lines up with
+    tokenize_message token for token — the separators are all characters
+    _WORD_RE discards anyway, and neither n-grams nor sizes span them.
+
+    Returns [] if the two ever disagree, which switches the rule off rather
+    than mis-attributing words; a wrong boundary would be worse than none.
+    """
+    out: list[int] = []
+    for i, part in enumerate(_SEGMENT_BREAK.split(text)):
+        if part is None:
+            continue
+        out.extend([i] * len(tokenize_message(part)))
+    return out if len(out) == len(tokenize_message(text)) else []
 
 
 def tokenize_message(text: str) -> list[str]:
@@ -513,7 +565,15 @@ def _expand(fragment: str) -> list[str]:
             # it — "BDC" is a real clone_of token and also how people write
             # Bleu de Chanel. Offer both readings rather than choosing.
             out.append(token)
-            out.extend(tokenize(curated))
+            expanded = tokenize(curated)
+            # ...unless they already wrote the expansion themselves. "calvin
+            # klein ck shock edt" became "calvin klein ck calvin klein shock
+            # edt", and the spare brand pair was left over after CK Shock
+            # matched — enough to pull in CK One, CK All and CK Defy on the
+            # brand alone. Offering a second reading is only useful when
+            # there is a second reading to offer.
+            if not set(expanded) <= set(out):
+                out.extend(expanded)
             continue
         expansion = curated or _acronyms.get(token)
         if expansion and token not in _idf:
@@ -558,6 +618,13 @@ class Scored:
     kind: str
     consumed: frozenset[int]      # message token indices this match used
     matched_tokens: tuple[str, ...]
+    # True when the customer wrote this product's name IN FULL — the winning
+    # variant started at the beginning of the display name and every word of
+    # it was typed. That is a different claim from a high coverage score:
+    # a bare "9pm" covers the suffix variant ("9pm") completely too, but it
+    # is not the whole of "Afnan Afnan 9PM". See the co-candidate rules in
+    # search(), where it is what tells a family apart from an exact request.
+    whole_name: bool = False
 
 
 _variants: list[Variant] = []
@@ -711,7 +778,9 @@ def _ensure_index() -> None:
 
 # --- Message -> catalog token similarity ------------------------------------
 
-def _message_queries(tokens: list[str]) -> list[tuple[str, list[frozenset[int]]]]:
+def _message_queries(
+    tokens: list[str], segments: list[int] | None = None
+) -> list[tuple[str, list[frozenset[int]]]]:
     """
     Query strings to look up in the catalog vocabulary, each paired with
     EVERY set of message token indices where it occurs.
@@ -748,7 +817,16 @@ def _message_queries(tokens: list[str]) -> list[tuple[str, list[frozenset[int]]]
             spots.append(idx)
 
     for i, tok in enumerate(tokens):
-        if tok not in _MESSAGE_STOPWORDS:
+        # Filler is not queried on its own — that is what stops "is", "the"
+        # or "one" from anchoring a match. But a filler word that is ALSO a
+        # catalog word is a real part of a real name, and skipping it
+        # entirely meant "most wanted" produced no candidates whatsoever:
+        # both words are filler, so nothing was ever looked up and the
+        # search returned before scoring began. Offered here only so the
+        # products carrying it become candidates; _score_variants still
+        # routes filler through the literal path, where it counts toward
+        # coverage and can never anchor anything.
+        if tok not in _MESSAGE_STOPWORDS or tok in _by_token:
             add(tok, frozenset({i}))
 
     for n in (2, 3):
@@ -762,6 +840,10 @@ def _message_queries(tokens: list[str]) -> list[tuple[str, list[frozenset[int]]]
             # VANI-ELLE. A window containing even one real word is kept, so
             # "musk is great" and "club de nuit" are unaffected.
             if all(w in _MESSAGE_STOPWORDS for w in window):
+                continue
+            # Two words either side of a comma or a line break are two
+            # different items, not one word split by a stray space.
+            if segments and len(set(segments[i : i + n])) > 1:
                 continue
             add("".join(window), frozenset(range(i, i + n)))
 
@@ -808,7 +890,9 @@ def _decompose(word: str) -> tuple[str, ...]:
     return parts if parts and len(parts) > 1 else ()
 
 
-def _token_matches(tokens: list[str]) -> dict[str, tuple[float, frozenset[int]]]:
+def _token_matches(
+    tokens: list[str], segments: list[int] | None = None
+) -> dict[str, tuple[float, frozenset[int]]]:
     """
     Best similarity (0-1) of every catalog vocabulary token against this
     message, plus which message token indices produced it.
@@ -819,7 +903,7 @@ def _token_matches(tokens: list[str]) -> dict[str, tuple[float, frozenset[int]]]
     LLM was handed a pre-narrowed top-25 built from noisy n-gram scores.
     """
     _ensure_index()
-    queries = _message_queries(tokens)
+    queries = _message_queries(tokens, segments)
     if not queries or not _vocab:
         return {}
 
@@ -927,13 +1011,17 @@ def _score_variants(
     content: frozenset[int] = frozenset(),
     weak: frozenset[int] = frozenset(),
     literal: dict[str, list[frozenset[int]]] | None = None,
+    leftovers: bool = False,
+    segments: list[int] | None = None,
 ) -> dict[str, Scored]:
     """Best-scoring variant per perfume, considering only matches whose
     message tokens are still unconsumed. `content` is the message's
     non-filler token indices (used for the message-coverage factor) and
     `weak` its ordinary-English ones (see _WEAK_ANCHOR_TOKENS), and
     `literal` maps every message word — filler included — to where it
-    occurs.
+    occurs. `leftovers` says these are the words left after a product has
+    already been identified in this message, which changes what a bare
+    brand means (see the brand-prefix rule below).
 
     Filler words are excluded from matching so they cannot anchor a match,
     but they are still words the customer typed, and pretending they are
@@ -979,25 +1067,55 @@ def _score_variants(
         matched_weight = 0.0
         consumed: set[int] = set()
         matched: list[str] = []
+        written: list[str] = []
 
         for token, weight in zip(variant.tokens, variant.weights):
             spots = usable.get(token)
-            if not spots:
-                # Not matchable, but did they type it anyway? Filler words
-                # count toward coverage; they never become `matched`, so
-                # every anchoring rule below still sees only real hits.
+            # Did they type it anyway? Filler words count toward coverage;
+            # they never become `matched`, so every anchoring rule below
+            # still sees only real hits.
+            #
+            # Taken in preference to a fuzzy reading for filler, not just
+            # when there is no other option. Filler is never queried on its
+            # own (that is what stops it anchoring), so the only route by
+            # which one reaches `usable` at all is a joined n-gram — "most
+            # wanted edp" offering "wantededp", which scores 0.80 against
+            # the catalog's "wanted". The customer had written "wanted",
+            # perfectly, right there; scoring it at 0.80 made the match
+            # look misspelled and cost Albait Aldimashqi Most Wanted EDP
+            # its answer entirely. Same for "afternoon swim".
+            filler = token in _MESSAGE_STOPWORDS
+            if not spots or filler:
                 here = [i for i in (literal or {}).get(token, ()) if i <= available]
                 if here:
                     idx = min(here, key=lambda s: abs(min(s) - anchor_at))
                     evidence += weight
                     matched_weight += weight
                     consumed.update(idx)
-                continue
-            sim, idx = min(spots, key=lambda s: (abs(min(s[1]) - anchor_at), -s[0]))
+                    written.append(token)
+                    continue
+                if not spots:
+                    continue
+            # How well the word was read comes first; WHERE it was read only
+            # breaks ties. Position used to lead, and a joined n-gram could
+            # therefore outrank the word itself: "man in black parfum"
+            # offers "inblack", which scores 0.83 against the catalog's
+            # "black", and because it starts one token earlier it sat nearer
+            # the anchor than the customer's own, perfectly-spelled "black".
+            # The name then looked misspelled and Bvlgari Man in Black lost
+            # its answer. Among equally good readings position still
+            # decides, which is what binds "Club de Nuit Untold" to the
+            # "club de nuit" written next to it rather than an earlier one.
+            best_sim = max(s[0] for s in spots)
+            sim, idx = min(
+                (s for s in spots if s[0] >= best_sim - 1e-9),
+                key=lambda s: abs(min(s[1]) - anchor_at),
+            )
             evidence += weight * sim
             matched_weight += weight
             consumed.update(idx)
             matched.append(token)
+            written.append(token)
 
         if evidence <= 0:
             continue
@@ -1009,6 +1127,14 @@ def _score_variants(
         # different lines of their list.
         span = max(consumed) - min(consumed) + 1
         if span > len(variant.tokens) + _MAX_NAME_GAP:
+            continue
+        if content:
+            interior = (content & frozenset(range(min(consumed), max(consumed)))) - consumed
+            if len(interior) > _MAX_CONTENT_GAP:
+                continue
+
+        # One name, one item of the customer's list. See _SEGMENT_BREAK.
+        if segments and len({segments[i] for i in consumed}) > 1:
             continue
 
         # Matching nothing but the first word of the FULL name is matching
@@ -1023,13 +1149,69 @@ def _score_variants(
         # "asrar" — spelled correctly — returned nothing at all, because the
         # only variant it could carry alone was ("asrar", "al", "lail") and
         # it happened to be that variant's first token.
+        # The same is true of the first TWO words, and of any leading run:
+        # a brand is however many words the brand happens to be. "Calvin
+        # Klein CK Shock EDT" answered with CK One, CK All, CK Defy and CK
+        # Eternity attached, every one of them matched on "calvin klein" and
+        # nothing else — words the customer typed only because they are the
+        # brand of the product they DID name. Requiring the customer to have
+        # written something past the opening run is what makes the reply the
+        # product they asked for rather than the brand's whole shelf.
+        #
+        # Only when part of the name is missing: written == the full token
+        # list means they typed all of it, which is not a brand-only match
+        # however the name is shaped.
         if (
-            len(matched) == 1
-            and variant.at_name_start
-            and len(variant.tokens) > 1
-            and matched[0] == variant.tokens[0]
+            variant.at_name_start
+            and len(written) < len(variant.tokens)
+            and tuple(written) == variant.tokens[: len(written)]
+            and (leftovers or len(written) == 1)
         ):
             continue
+
+        # ...unless the customer wrote the name OUT, exactly and in one
+        # piece. "Cherry Bouquet" and "Night Out" are complete product
+        # names made entirely of ordinary English words, and the rules
+        # below — written for fragments — silenced both: two full, correctly
+        # spelled, adjacent words of a real name got no reply at all, while
+        # "Delicious Bouquet" (one rare word) answered fine. Which is to say
+        # the rules were rejecting names for being made of common words,
+        # not for being weak evidence.
+        #
+        # What makes this safe is that it is not a fragment: every word of
+        # the variant was typed (coverage 1.0), spelled right, with nothing
+        # between them. "blue edt" — the fragment those rules exist to
+        # block — still cannot get through: the exemption counts only words
+        # that carry meaning, and "edt" is packaging, leaving "blue" alone.
+        # Nor could the live "Fahrenheit EDT ... bluedart air" case, whose
+        # two words sat thirty tokens apart in different sentences.
+        wrote_it_out = (
+            len(variant.tokens) > 1
+            and matched_weight >= variant.total_weight - 1e-9
+            and evidence >= matched_weight - 1e-9
+            and len(consumed) == max(consumed) - min(consumed) + 1
+            and (
+                sum(
+                    1
+                    for t in written
+                    if t not in _NOISE_TOKENS and t not in _MESSAGE_STOPWORDS
+                ) > 1
+                # ...or the name is made of words too plain to carry it on
+                # their own ("Prada Ocean EDP", "Le Male EDT", "Most
+                # Wanted", "My Way") and the customer wrote NOTHING ELSE in
+                # this item of their list. Nothing else at all — not "no
+                # other content words", which let "what all do you have in
+                # stock for men" answer with Clinique Happy For Men off the
+                # last two words of the sentence.
+                #
+                # Per ITEM rather than per message, because a name like
+                # this is no less named for having six others beside it:
+                # "my way" alone answered and the same word in a seven-line
+                # order did not, which is backwards. Buried mid-sentence it
+                # is still the coincidence the rules above exist to reject.
+                or consumed >= _item_indices(segments, available, consumed)
+            )
+        )
 
         # Nor may a match rest on a single ordinary English word — see
         # _WEAK_ANCHOR_TOKENS. In combination those words are fine; alone
@@ -1040,8 +1222,10 @@ def _score_variants(
         # catches "rose" hitting the token "rosa", one edit away and not an
         # English word itself — the customer still only typed an ordinary
         # noun, which is the thing that makes it too little to go on.
-        if len(matched) == 1 and (
-            matched[0] in _WEAK_ANCHOR_TOKENS or (weak and consumed <= weak)
+        if (
+            len(matched) == 1
+            and (matched[0] in _WEAK_ANCHOR_TOKENS or (weak and consumed <= weak))
+            and not wrote_it_out
         ):
             continue
 
@@ -1058,7 +1242,11 @@ def _score_variants(
         # such words — without it those become unreachable — and it is
         # judged on the full name, not this variant (see Variant.
         # source_substantive).
-        if variant.source_substantive and not any(_is_substantive(t) for t in matched):
+        if (
+            variant.source_substantive
+            and not any(_is_substantive(t) for t in matched)
+            and not wrote_it_out
+        ):
             continue
 
         # A match must rest on at least one word that is not conversational
@@ -1111,9 +1299,22 @@ def _score_variants(
                 kind=variant.kind,
                 consumed=frozenset(consumed),
                 matched_tokens=tuple(matched),
+                whole_name=variant.at_name_start and coverage >= 1.0 - 1e-9,
             )
 
     return best
+
+
+def _item_indices(
+    segments: list[int] | None, available: frozenset[int], consumed: set[int]
+) -> frozenset[int]:
+    """Every message token still in play that belongs to the same item of
+    the customer's list as this match — see _SEGMENT_BREAK. Falls back to
+    the whole message when the message has no list structure to read."""
+    if not segments:
+        return available
+    here = {segments[i] for i in consumed}
+    return frozenset(i for i in available if segments[i] in here)
 
 
 def _is_the_whole_message(scored: "Scored", content: frozenset[int]) -> bool:
@@ -1169,7 +1370,8 @@ def search(text: str, limit: int = MAX_RESULTS) -> list[Scored]:
     if not tokens:
         return []
 
-    matches = _token_matches(tokens)
+    segments = message_segments(text)
+    matches = _token_matches(tokens, segments)
     if not matches:
         return []
 
@@ -1185,7 +1387,15 @@ def search(text: str, limit: int = MAX_RESULTS) -> list[Scored]:
     results: list[Scored] = []
 
     for _ in range(_MAX_ROUNDS):
-        scored = _score_variants(matches, available, content & available, weak, literal)
+        scored = _score_variants(
+            matches,
+            available,
+            content & available,
+            weak,
+            literal,
+            leftovers=bool(results),
+            segments=segments,
+        )
         if not scored:
             break
 
@@ -1263,6 +1473,21 @@ def search(text: str, limit: int = MAX_RESULTS) -> list[Scored]:
                 or s.score >= top.score * TIE_RATIO
             )
         ]
+        # A customer who wrote a product's name IN FULL asked for that
+        # product. Not for it plus the three neighbours that share its first
+        # two words: "afnan afnan 9pm" came back with 9PM Rebel, 9PM Night
+        # Out and 9PM Elixir Parfum attached, each at a different price, on
+        # the strength of words the customer only typed because they belong
+        # to the name they DID write.
+        #
+        # This is the exact opposite case to the family above, and
+        # whole_name is what separates them: a bare "9pm" is the complete
+        # name of nothing, so every 9PM stays; "afnan afnan 9pm" is the
+        # complete name of one entry, so the partials go. Applied only when
+        # the top match is itself a whole name — otherwise nothing changes.
+        if top.whole_name:
+            tied = [s for s in tied if s.whole_name]
+
         # If the customer named something we stock under that very name, the
         # entries that merely CLONE it are alternatives, not co-candidates —
         # "dior sauvage edt price" must answer with Dior Sauvage EDT, not
@@ -1279,6 +1504,56 @@ def search(text: str, limit: int = MAX_RESULTS) -> list[Scored]:
         consumed = frozenset().union(*(s.consumed for s in tied))
         if not consumed:
             break
+
+        # A name that says a word twice consumes the customer's word once.
+        # "Chanel Bleu De Chanel EDP" is written with "chanel" at both ends;
+        # the match binds each of the name's two "chanel"s to whichever
+        # message occurrence sits nearer its anchor, which can be the same
+        # one — leaving a spare "chanel" for the next round to build Albait
+        # Aldimashqi Chanel no 5 out of. Same shape for "Burberry Mr.
+        # Burberry EDT" and "Hermes Terre D'Hermes". A repeat sitting INSIDE
+        # the span the match already covers is part of that same mention,
+        # so it goes with it; one further along the message is a separate
+        # mention and is left for the round that will want it.
+        spoken = {t for s in tied for t in s.matched_tokens}
+        extra = {
+            i
+            for i in range(min(consumed), max(consumed) + 1)
+            if i in available and tokens[i] in spoken
+        }
+        # Also just outside it, walking out while the words keep belonging
+        # to the name: "hermes terre d hermes edt tdh" binds both of the
+        # name's "hermes"es to the second one, and the first — sitting one
+        # position BEFORE the span — was still there afterwards. The walk
+        # stops at the first word the name does not contain, so a second
+        # product listed next door is never swallowed.
+        for step, start in ((-1, min(consumed) - 1), (1, max(consumed) + 1)):
+            i = start
+            while 0 <= i < len(tokens) and i in available and tokens[i] in spoken:
+                extra.add(i)
+                i += step
+
+        # An abbreviation and the words it stands for are one mention, so
+        # they are consumed as one. "BDC parfum" is tokenized as "bdc bleu
+        # de chanel parfum" — both readings offered, since "bdc" is a real
+        # clone_of token as well as shorthand (see _expand). Bleu De Chanel
+        # Parfum then took the spelled-out reading and left the "bdc"
+        # behind, and four unrelated products that also list BDC as their
+        # clone came back off that one leftover word.
+        for i, tok in enumerate(tokens):
+            expansion = _ALIASES.get(tok)
+            if not expansion or i not in available or i in extra:
+                continue
+            words = tokenize(expansion)
+            after = range(i + 1, i + 1 + len(words))
+            if (
+                after.stop <= len(tokens)
+                and [tokens[j] for j in after] == words
+                and all(j in consumed or j in extra for j in after)
+            ):
+                extra.add(i)
+
+        consumed |= frozenset(extra)
         available = available - consumed
         if not available or len(results) >= limit:
             break

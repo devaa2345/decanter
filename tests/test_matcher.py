@@ -22,7 +22,6 @@ from app import conversation
 from app.catalog import PERFUMES
 from app.groq_client import GroqClassification
 from app.matcher import (
-    sizes_per_perfume,
     MatchResult,
     _looks_like_explicit_request,
     extract_requested_size_ml,
@@ -598,83 +597,51 @@ class TestWishlistIsAnAsk:
         assert ids(result) == []
 
 
-class TestPerPerfumeSizes:
+class TestSizeStillMattersForIntent:
     """
-    Reported live: a customer ordering several decants sized them
-    individually — "3ml for the first one, 5ml for the second" — and got the
-    FIRST size quoted for every product. On a three-item order that is two
-    wrong prices, on an order the customer is about to pay for.
-
-    A size belongs to the name it was written next to.
+    Per-perfume size parsing is gone — every card now shows the full size
+    grid, so there was nothing left reading it. A bare ml is still what
+    makes "sauvage 3ml" recognizably an ask rather than a remark, and that
+    signal is what extract_requested_size_ml exists for now.
     """
 
     def setup_method(self):
         conversation.clear()
 
-    def _sizes(self, message):
-        return sizes_per_perfume(message, search(message))
+    def test_a_bare_size_is_read_out_of_the_message(self):
+        assert extract_requested_size_ml(normalize_message("9pm rebel 3ml")) == 3
+        assert extract_requested_size_ml(normalize_message("sauvage 10 ml price")) == 10
+        assert extract_requested_size_ml(normalize_message("9pm rebel")) is None
 
-    def _named(self, message):
-        return {
-            PERFUMES[pid]["display_name"]: ml
-            for pid, ml in self._sizes(message).items()
-        }
+    def test_naming_a_size_alone_counts_as_an_ask(self):
+        """No "price"/"rate"/"how much" anywhere — the size is the whole
+        signal, and without it this message would fall silent."""
+        with groq_unreachable():
+            result = run(match_perfume("9pm rebel 3ml"))
+        assert ids(result) == ["afnan9pm_rebel"]
 
-    def test_each_product_gets_its_own_size(self):
-        got = self._named("9pm rebel 3ml, kaaf 10ml")
-        assert got["Afnan 9PM Rebel"] == 3
-        assert got["Ahmed Al Maghribi Kaaf"] == 10
-
-    def test_three_different_sizes(self):
-        got = self._named("9pm rebel 3ml, khamrah 5ml, kaaf 10ml")
-        assert got["Afnan 9PM Rebel"] == 3
-        assert got["Lattafa Khamrah"] == 5
-        assert got["Ahmed Al Maghribi Kaaf"] == 10
-
-    def test_one_size_for_the_whole_order_still_applies_to_all(self):
-        got = self._named("9pm rebel and kaaf 5ml")
-        assert set(got.values()) == {5}
-
-    def test_a_size_written_before_the_names_still_applies(self):
-        """"3ml of X and Y" — the size leads, which the next-size-after rule
-        alone would miss entirely."""
-        got = self._named("3ml of 9pm rebel and kaaf")
-        assert set(got.values()) == {3}
-
-    def test_no_size_mentioned_yields_nothing(self):
-        assert self._sizes("9pm rebel and kaaf") == {}
-
-    def test_sizes_ride_along_on_the_match_result(self):
-        async def fake(message, candidates, history=None):
-            return GroqClassification(perfume_ids=list(candidates), explicit_ask=True)
-
-        with patch(CLASSIFY, new_callable=AsyncMock, side_effect=fake):
+    def test_the_result_no_longer_carries_per_product_sizes(self):
+        """Both products still match; MatchResult simply no longer has a
+        per-product size field for anything downstream to act on."""
+        with groq_unreachable():
             result = run(match_perfume("9pm rebel 3ml, kaaf 10ml"))
 
-        named = {PERFUMES[p]["display_name"]: ml for p, ml in result.sizes.items()}
-        assert named["Afnan 9PM Rebel"] == 3
-        assert named["Ahmed Al Maghribi Kaaf"] == 10
+        assert not hasattr(result, "sizes")
+        named = {PERFUMES[p]["display_name"] for p in ids(result)}
+        assert {"Afnan 9PM Rebel", "Ahmed Al Maghribi Kaaf"} <= named
 
 
 class TestMultiSizeCard:
-    """The reply itself has to show those different sizes, not one of them."""
+    """The card never narrows to a size the customer named — every perfume
+    shows its whole grid. See
+    tests/test_formatter.py::TestMultiCardAlwaysShowsEverySize."""
 
-    def test_card_prices_each_product_at_its_own_size(self):
+    def test_card_shows_every_size_regardless_of_what_was_asked(self):
         from app.formatter import build_multi_price_card
 
         rebel = next(p for p, d in PERFUMES.items() if d["display_name"] == "Afnan 9PM Rebel")
         kaaf = next(p for p, d in PERFUMES.items() if "Kaaf" == d["display_name"].split()[-1])
-        card = build_multi_price_card(
-            [rebel, kaaf], None, None, requested_ml=3, sizes={rebel: 3, kaaf: 10}
-        )
-        assert "3ml" in card and "10ml" in card
-        expected = PERFUMES[rebel]["prices"]["3ml"] + PERFUMES[kaaf]["prices"]["10ml"]
-        assert f"{expected:,}" in card
-
-    def test_a_product_without_its_own_size_falls_back(self):
-        from app.formatter import build_multi_price_card
-
-        rebel = next(p for p, d in PERFUMES.items() if d["display_name"] == "Afnan 9PM Rebel")
-        kaaf = next(p for p, d in PERFUMES.items() if "Kaaf" == d["display_name"].split()[-1])
-        card = build_multi_price_card([rebel, kaaf], None, None, requested_ml=5, sizes={rebel: 3})
-        assert "3ml" in card and "5ml" in card
+        card = build_multi_price_card([rebel, kaaf])
+        for pid in (rebel, kaaf):
+            for price in PERFUMES[pid]["prices"].values():
+                assert f"₹{price:,}" in card

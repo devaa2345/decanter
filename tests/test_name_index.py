@@ -347,9 +347,27 @@ class TestNoProductWeCannotSell:
 
     def test_packaging_words_alone_are_not_a_product(self):
         """"EDT"/"EDP" are real parts of real names but identify nothing on
-        their own, and neither do they in combination with a bare colour."""
+        their own."""
         assert search("edt") == []
-        assert search("blue edt") == []
+        assert search("edp price") == []
+        assert search("blue") == []
+
+    def test_a_plain_word_plus_packaging_answers_only_as_the_whole_message(self):
+        """"blue edt" is thin, but it is not nothing: as the entire message
+        it is someone asking about blue EDTs, and the three we stock are a
+        better reply than silence. What must NOT happen is those same two
+        words being picked out of a sentence about something else — which is
+        what the courier test above covers, and what kept this pair silent
+        everywhere before. The same rule is what makes "Prada Ocean EDP" and
+        "Le Male EDT" reachable at all; every word of those names is
+        ordinary English or packaging."""
+        blue_edts = {p.perfume_id for p in search("blue edt")}
+        assert blue_edts
+        assert all("blue" in PERFUMES[p]["display_name"].lower() for p in blue_edts)
+
+        # ...but only as the whole message. Embedded in a sentence that is
+        # about something else, the same two words identify nothing.
+        assert search("is the blue edt box sealed and how fast is delivery") == []
 
 
 class TestNewlyAddedCatalogEntry:
@@ -593,3 +611,123 @@ class TestCommaSeparatedOrder:
         Untold", reached by reading "told" as "untold"."""
         found = joined(search("the owner told me 9pm rebel is really nice apparently"))
         assert "untold" not in found
+
+
+class TestAnExactNameIsAnExactRequest:
+    """
+    Reported by the shop: the reply padded precise requests with the
+    neighbours that share the name's opening words. Someone who types
+    "afnan afnan 9pm" gets four cards at four different prices, and the one
+    they asked for is buried among three they did not.
+
+    A name written IN FULL asks for that product. See Scored.whole_name.
+    """
+
+    def test_a_full_name_returns_that_product_alone(self):
+        assert names(search("afnan afnan 9pm")) == ["Afnan Afnan 9PM"]
+        assert names(search("calvin klein ck shock edt")) == ["Calvin Klein CK Shock EDT"]
+
+    def test_a_repeated_brand_word_does_not_leak_into_a_second_round(self):
+        """"Chanel Bleu De Chanel EDP" says "chanel" twice; the customer's
+        second one used to be left over afterwards, and Albait Aldimashqi
+        Chanel no 5 was built out of it."""
+        assert names(search("chanel bleu de chanel edp")) == ["Chanel Bleu De Chanel EDP"]
+        assert names(search("burberry mr burberry edt")) == ["Burberry Mr. Burberry EDT"]
+
+    def test_a_partial_name_still_returns_the_whole_family(self):
+        """The opposite case, and the reason this is about whole names
+        rather than about scores: "9pm" is the complete name of nothing, so
+        every 9PM is a candidate and all of them are shown."""
+        found = names(search("9pm"))
+        assert len(found) > 1
+        assert all("9pm" in n.lower() for n in found)
+
+
+class TestANameIsWrittenInOnePiece:
+    """
+    Customers list one product per line, or separate them with commas.
+    Words either side of that break belong to different items — see
+    _SEGMENT_BREAK. Without this, an eight-line order produced products
+    nobody named, assembled from two lines at once.
+    """
+
+    ORDER = (
+        "- azzaro pour homme edt\n"
+        "- gucci gorgeous gardenia edp"
+    )
+
+    def test_a_name_is_not_assembled_across_two_lines(self):
+        found = names(search(self.ORDER))
+        assert "Gucci Gorgeous Gardenia EDP" in found
+        assert "Gucci Gorgeous Gardenia EDT" not in found
+
+    def test_both_items_are_still_found(self):
+        found = joined(search(self.ORDER))
+        assert "gorgeous gardenia" in found and "azzaro pour homme" in found
+
+    def test_a_word_from_three_lines_away_cannot_complete_a_name(self):
+        """The live shape of it: "ysl libre edp" on one line and "gucci
+        intnse oud" further down combined into YSL Libre Intense, which
+        then displaced the YSL Libre EDP actually written."""
+        found = names(search("- ysl libre edp\n- zimya ghyoom\n- gucci intnse oud"))
+        assert "YSL Libre EDP" in found
+        assert "YSL Libre Intense" not in found
+
+    def test_a_plain_name_counts_as_an_item_of_the_list(self):
+        """"My Way" is two ordinary words, so it only resolves when the
+        customer wrote nothing else — which has to mean nothing else in
+        THAT item, or a name like this could never appear in an order."""
+        assert "My Way" in names(search("my way"))
+        assert "My Way" in names(search("armaf club de nuit intense man edp 5ml, si fiori, my way"))
+
+
+class TestNamesMadeOfOrdinaryWords:
+    """
+    Some real products are named entirely out of words too plain to
+    identify anything on their own — Cherry Bouquet, Afternoon Swim, Night
+    Out, Most Wanted, The One. The rules that stop "blue" and "edt" being
+    assembled into a product were silencing every one of them.
+    """
+
+    @pytest.mark.parametrize(
+        "query,expected",
+        [
+            ("cherry bouquet", "Afnan Cherry Bouquet"),
+            ("afternoon swim", "Albait Niche Afternoon Swim"),
+            ("night out", "Afnan 9PM Night Out"),
+            ("most wanted edp", "Albait Aldimashqi Most Wanted EDP"),
+            ("the one edp", "Dolce & Gabbana The One EDP"),
+            ("man in black parfum", "Bvlgari Man in Black Parfum"),
+        ],
+    )
+    def test_a_name_written_out_in_full_resolves(self, query, expected):
+        assert expected in names(search(query))
+
+    def test_the_same_words_scattered_in_a_sentence_do_not(self):
+        """Written out, they are a name. Picked out of a question about
+        something else, they are the coincidence these rules exist for."""
+        assert search("what all do you have in stock for men") == []
+        assert search("will bluedart air be faster") == []
+
+
+class TestAnExactWordBeatsAFuzzyReading:
+    """
+    Adjacent words are joined and re-queried to recover missing spaces, and
+    a joined form can score against a real catalog token: "man in black
+    parfum" offers "inblack", which reads as "black" at 0.83. Sitting one
+    token earlier, it used to be taken in preference to the customer's own,
+    perfectly spelled "black" — making the name look misspelled.
+    """
+
+    def test_the_word_the_customer_typed_is_the_one_that_is_scored(self):
+        hit = next(
+            r for r in search("man in black parfum")
+            if PERFUMES[r.perfume_id]["display_name"] == "Bvlgari Man in Black Parfum"
+        )
+        assert hit.similarity > 0.99
+
+    def test_position_still_decides_between_equally_good_readings(self):
+        """Two mentions of the same brand in one message must still bind to
+        the product written beside them."""
+        found = joined(search("club de nuit intense man edp, club de nuit untold"))
+        assert "untold" in found and "intense man" in found

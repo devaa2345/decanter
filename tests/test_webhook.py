@@ -445,13 +445,11 @@ class TestWebhookHandler:
         assert "NOT ONLY INTENSE" not in reply_text.upper()
 
     @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
-    def test_requested_size_shows_only_that_variant_with_grand_total(self, mock_send, client):
-        """'9pm rebel 3ml' must show only the 3ml price, plus delivery cost
-        added per region with the grand total shown alongside it — not the
-        full size grid. classify_and_phrase returning an empty (not None)
-        GroqClassification simulates Groq having genuinely run and found
-        this unconfident, so it's the deterministic exact-match fallback +
-        app.formatter's requested_ml handling actually under test here."""
+    def test_naming_a_size_still_shows_every_size(self, mock_send, client):
+        """Naming a size tells us which one they have in mind; it is not a
+        request to hide the rest. "9pm rebel 3ml" shows the whole grid, so
+        the customer can see that 5ml is only a little more — which is how a
+        decant shop sells a bigger decant."""
         with patch(
             "app.groq_client.classify_and_phrase",
             new_callable=AsyncMock,
@@ -463,11 +461,8 @@ class TestWebhookHandler:
         reply_text = mock_send.call_args[0][1]
         assert "AFNAN 9PM REBEL" in reply_text.upper()
         assert "3ml  ₹160" in reply_text
-        assert "₹220" not in reply_text  # 5ml price must not appear
-        assert "Delivery + grand total:" in reply_text
-        assert "₹65 - Delhi NCR - Total ₹225" in reply_text
-        assert "₹80 - Rest of India - Total ₹240" in reply_text
-        assert "₹100 - J&K, NE, Lakshadweep & Andaman - Total ₹260" in reply_text
+        assert "5ml  ₹220" in reply_text  # the sizes they did not name are still offered
+        assert "Delivery + grand total:" not in reply_text
 
     @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
     def test_ambiguous_9pm_lists_all_real_candidates(self, mock_send, client):
@@ -759,9 +754,10 @@ class TestConversationContextEndToEnd:
         mock_send.assert_called_once()
         reply = mock_send.call_args[0][1]
         assert "AFNAN 9PM REBEL" in reply.upper()
-        # The follow-up named a size, so the reply is that one size plus the
-        # delivery maths — not the whole grid again.
-        assert "Delivery + grand total:" in reply
+        # The follow-up named a size, but the card is never narrowed to it —
+        # the point of the test is that context carried the perfume forward.
+        assert "3ml  ₹160" in reply
+        assert "5ml  ₹220" in reply
 
     @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
     @patch(

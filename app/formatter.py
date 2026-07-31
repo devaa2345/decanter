@@ -12,7 +12,7 @@ text only.
 
 import re
 
-from app.catalog import PERFUMES, SHIPPING_CARD, SHIPPING_RATES
+from app.catalog import PERFUMES, SHIPPING_CARD
 
 
 # --- Fixed reply messages ---
@@ -156,38 +156,7 @@ def _size_display_label(size_key: str) -> str:
     return f"Full {ml_num}ml" if ml_num.isdigit() else "Full bottle"
 
 
-def _resolve_size_key(prices: dict, requested_ml: int) -> str | None:
-    """
-    Map a bare ml number parsed from the customer's message (see
-    app.matcher.extract_requested_size_ml) onto this perfume's actual
-    prices-dict key. Catalog sizes are stored either as "Xml" (decant
-    tiers) or "Xml_full" (full bottles) — see catalog_data.json's shape —
-    so both forms are tried. Returns None if this perfume simply doesn't
-    come in that size, so the caller can fall back to showing every size
-    it does offer instead.
-    """
-    for key in (f"{requested_ml}ml", f"{requested_ml}ml_full"):
-        if key in prices:
-            return key
-    return None
-
-
-def _delivery_total_lines(price: int) -> list[str]:
-    """
-    Delivery cost per region added to one specific size's price, with the
-    grand total shown alongside it — used only when the customer named an
-    exact ml size (build_price_card/build_multi_price_card's requested_ml),
-    so the price+shipping math is a single visible number per region
-    instead of a separate lookup. Same characters as SHIPPING_CARD (₹, "-",
-    plain text) — no untested punctuation near Chat Mitra's send API.
-    """
-    lines = ["Prepaid only, no COD", "Delivery + grand total:"]
-    for region, rate in SHIPPING_RATES.items():
-        lines.append(f"₹{rate} - {region} - Total {_format_price(price + rate)}")
-    return lines
-
-
-def _build_card_block(perfume: dict, size_key: str | None = None) -> list[str]:
+def _build_card_block(perfume: dict) -> list[str]:
     """
     Name header + price grid lines for one perfume — no opening/closing/
     shipping card, just the self-contained visual block. Shared by
@@ -195,10 +164,10 @@ def _build_card_block(perfume: dict, size_key: str | None = None) -> list[str]:
     perfumes, which shows one of these per perfume but only ONE shared
     shipping card at the end instead of repeating it per item).
 
-    size_key, when given, must be one of this perfume's actual prices-dict
-    keys (see _resolve_size_key) — shows ONLY that one size instead of the
-    full grid, since the customer named one specific ml ("9pm rebel 3ml")
-    and every other tier alongside it would just be noise.
+    Always the perfume's FULL size grid, even when the customer named one
+    specific ml. Narrowing to the size they said reads as the bot deciding
+    what they may buy, and hides that the next tier up is often only a
+    little more — which is exactly how a decant shop sells a bigger decant.
 
     No asterisks anywhere (see module docstring) and no leading emoji (🌸
     was one of the things suspected before "*" was isolated as the actual
@@ -212,11 +181,6 @@ def _build_card_block(perfume: dict, size_key: str | None = None) -> list[str]:
 
     divider = "-" * min(max(len(display_name), 12), 32)
     lines = [display_name.upper(), divider]
-
-    if size_key and size_key in prices:
-        lines.append(f"{_size_display_label(size_key)}  {_format_price(prices[size_key])}")
-        lines.append(divider)
-        return lines
 
     # Define the standard decant tiers and full bottle tier
     decant_sizes = _DECANT_SIZES
@@ -259,20 +223,13 @@ def build_price_card(
     perfume_id: str,
     opening: str | None = None,
     closing: str | None = None,
-    requested_ml: int | None = None,
 ) -> str:
     """
     Build the full reply message for a single matched perfume.
 
-    Returns the price card + shipping card as a single string.
-    By default shows all available size tiers. If requested_ml (parsed
-    from the customer's message — see app.matcher.extract_requested_size_ml)
-    names a size this perfume actually offers, shows ONLY that size instead,
-    with delivery cost added per region and the grand total shown alongside
-    it (see _delivery_total_lines) rather than the generic shipping card.
-    Falls back to the full grid + generic shipping card if this perfume
-    doesn't come in the requested size at all, so the customer still sees
-    what sizes ARE available instead of a dead end.
+    Returns the price card + shipping card as a single string, always
+    showing every size tier this perfume comes in — see _build_card_block
+    for why a named ml never narrows the grid.
 
     opening/closing (from Groq's classify_and_phrase — see app.matcher)
     wrap the card with short, natural, personalized phrasing when
@@ -286,19 +243,12 @@ def build_price_card(
     if not perfume:
         return FALLBACK_MESSAGE
 
-    prices = perfume["prices"]
-    size_key = _resolve_size_key(prices, requested_ml) if requested_ml else None
-
     lines = []
     if opening:
         lines.append(opening)
         lines.append("")
-    lines.extend(_build_card_block(perfume, size_key=size_key))
-
-    if size_key:
-        lines.extend(_delivery_total_lines(prices[size_key]))
-    else:
-        lines.append(SHIPPING_CARD)
+    lines.extend(_build_card_block(perfume))
+    lines.append(SHIPPING_CARD)
 
     lines.append("")
     lines.append(closing or WILL_CONTACT_LINE)
@@ -310,8 +260,6 @@ def build_multi_price_card(
     perfume_ids: list[str] | None,
     opening: str | None = None,
     closing: str | None = None,
-    requested_ml: int | None = None,
-    sizes: dict[str, int] | None = None,
 ) -> str:
     """
     Reply for 2+ perfumes found in one message — used both when the
@@ -322,20 +270,10 @@ def build_multi_price_card(
     candidates with their prices, not just a random single guess or a
     content-free "which one?" prompt.
 
-    requested_ml (see build_price_card) collapses every candidate that
-    actually offers that size to a single compact line each, with ONE
-    combined subtotal + one shared delivery/grand-total block at the end —
-    never a full size grid per candidate. Confirmed live as a real bug
-    ("Rare Carbon 3ml"): the previous all-or-nothing version fell back to
-    dumping the FULL size grid for every one of 5 unrelated candidates the
-    moment even a single one didn't offer the requested size, which is far
-    worse than just noting that one candidate separately and still
-    answering cleanly for the rest. A candidate that doesn't come in the
-    requested size gets a brief one-line note (with the sizes it DOES come
-    in) instead of either its full grid or being silently dropped. Falls
-    back to the full comparison grid + one shared shipping card only when
-    NONE of the candidates offer the requested size at all — there's
-    nothing size-specific to total in that case.
+    Every perfume gets its full size grid, one after another, under a
+    single shared shipping card at the end (repeating the shipping card per
+    item would double the length of an already long message). Sizes the
+    customer named do not narrow these grids — see _build_card_block.
 
     Capped at _MAX_MULTI_CANDIDATES so a wide keyword collision can't
     produce an unreadably long message. Falls back to AMBIGUOUS_MESSAGE if
@@ -349,57 +287,17 @@ def build_multi_price_card(
     if not perfumes:
         return AMBIGUOUS_MESSAGE
 
-    # Each product can have its OWN size. "9pm rebel 3ml, khamrah 5ml, kaaf
-    # 10ml" is one order with three different sizes, and quoting the first
-    # size for all of them was two wrong prices — see
-    # app.matcher.sizes_per_perfume. requested_ml remains the fallback for
-    # every product the customer did not size individually.
-    sizes = sizes or {}
-    priced: list[tuple[dict, str]] = []
-    unavailable: list[tuple[dict, int]] = []
-    for pid, perfume in zip(shown, perfumes):
-        wanted = sizes.get(pid, requested_ml)
-        if not wanted:
-            continue
-        size_key = _resolve_size_key(perfume["prices"], wanted)
-        if size_key:
-            priced.append((perfume, size_key))
-        else:
-            unavailable.append((perfume, wanted))
-
     lines = []
     if opening:
         lines.append(opening)
         lines.append("")
 
-    if priced:
-        item_lines = [
-            f"{p['display_name'].upper()} - {_size_display_label(sk)}  {_format_price(p['prices'][sk])}"
-            for p, sk in priced
-        ]
-        for p, wanted in unavailable:
-            available = ", ".join(_size_display_label(k) for k in p["prices"])
-            item_lines.append(
-                f"{p['display_name'].upper()} - not available in {wanted}ml (has: {available})"
-            )
-
-        divider = "-" * min(max(max(len(line) for line in item_lines), 12), 40)
-        lines.extend(item_lines)
-        lines.append(divider)
-
-        subtotal = sum(p["prices"][sk] for p, sk in priced)
-        lines.append(f"Subtotal  {_format_price(subtotal)}")
-        lines.append("")
-        lines.extend(_delivery_total_lines(subtotal))
-    else:
-        # No size named, or none of the candidates offer the one that was —
-        # the full comparison grid + one shared shipping card, as always.
-        for i, perfume in enumerate(perfumes):
-            if i > 0:
-                lines.append("")
-            lines.extend(_build_card_block(perfume))
-        lines.append("")
-        lines.append(SHIPPING_CARD)
+    for i, perfume in enumerate(perfumes):
+        if i > 0:
+            lines.append("")
+        lines.extend(_build_card_block(perfume))
+    lines.append("")
+    lines.append(SHIPPING_CARD)
 
     remaining = len(perfume_ids) - len(shown)
     if remaining > 0:

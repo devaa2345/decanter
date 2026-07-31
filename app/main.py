@@ -34,10 +34,8 @@ from app.greeting import is_catalog_request, is_greeting_or_catalog_request
 from app.handoff import is_paused, record_own_send, start_pause, was_sent_by_bot
 from app.matcher import (
     MatchResult,
-    extract_requested_size_ml,
     has_confident_keyword_match,
     match_perfume,
-    normalize_message,
 )
 from app.order_confirmation import is_order_confirmation
 from app.routes_admin import router as admin_router
@@ -498,33 +496,20 @@ async def webhook_handler(request: Request):
     # distinct products or a single mention was ambiguous among close
     # variants — and either way the reply shows a full card for each.
     #
-    # requested_ml: if the customer named a specific ml size ("9pm rebel
-    # 3ml"), the reply shows only that size's price with delivery cost
-    # added per region and the grand total shown alongside — see
-    # app.formatter.build_price_card/build_multi_price_card — instead of
-    # the full size grid. Parsed independently of which layer matched the
-    # perfume(s), so it applies the same way whether Groq or the
-    # deterministic fallback found the match.
-    #
-    # sizes: a customer ordering several decants sizes them individually
-    # ("9pm rebel 3ml, khamrah 5ml, kaaf 10ml"). Each product takes the size
-    # written next to its own name; requested_ml stays the fallback for any
-    # product they did not size — see app.matcher.sizes_per_perfume.
-    requested_ml = extract_requested_size_ml(normalize_message(message_text))
-    sizes = result.sizes
-
+    # Every reply shows a perfume's FULL size grid, whether or not the
+    # customer named a size. Narrowing to the one size they asked for reads
+    # as the bot deciding what they may buy: someone who says "9pm rebel
+    # 3ml" is telling us which one they have in mind, not asking us to hide
+    # the other five — and seeing 5ml is only ₹60 more is how a decant shop
+    # sells a bigger decant. The size is still parsed (see
+    # app.matcher.sizes_per_perfume) because analytics and the LLM prompt
+    # both read it; it just no longer filters what the customer sees.
     if result.matched_perfume_ids:
         reply_text = build_multi_price_card(
-            result.matched_perfume_ids,
-            result.opening,
-            result.closing,
-            requested_ml=requested_ml,
-            sizes=sizes,
+            result.matched_perfume_ids, result.opening, result.closing
         )
     elif result.perfume_id:
-        reply_text = build_price_card(
-            result.perfume_id, result.opening, result.closing, requested_ml=requested_ml
-        )
+        reply_text = build_price_card(result.perfume_id, result.opening, result.closing)
     elif is_greeting_or_catalog_request(message_text):
         reply_text = FALLBACK_MESSAGE
     else:

@@ -84,11 +84,6 @@ class MatchResult:
     llm_unavailable: bool = False
     # Debug/diagnostic view of what the index scored, best first.
     scores: list[tuple[str, float]] = field(default_factory=list)
-    # perfume_id -> the ml size the customer asked for THAT product, when
-    # they sized products individually ("9pm rebel 3ml, khamrah 5ml"). Only
-    # the matcher knows where each name sat in the message, so only it can
-    # work this out — see sizes_per_perfume.
-    sizes: dict[str, int] = field(default_factory=dict)
 
 
 # --- Message normalization --------------------------------------------------
@@ -109,8 +104,10 @@ _ML_SIZE_PATTERN = re.compile(r"\b(\d{1,4})\s*ml\b")
 def extract_requested_size_ml(normalized: str) -> int | None:
     """
     Pull the ml quantity out of a normalized message ("9pm rebel 3ml",
-    "sauvage 10 ml price") so the reply can show just that one size instead
-    of the full price grid — see app.formatter.build_price_card.
+    "sauvage 10 ml price"). Naming a size does NOT narrow the price card —
+    every card shows the full grid (see app.formatter._build_card_block).
+    This is read purely as an intent signal: "sauvage 3ml" with no other
+    request words is still plainly someone asking to buy.
 
     Takes the first ml number mentioned; a message naming more than one size
     is rare enough, and ambiguous enough about which should win, that
@@ -118,58 +115,6 @@ def extract_requested_size_ml(normalized: str) -> int | None:
     """
     match = _ML_SIZE_PATTERN.search(normalized)
     return int(match.group(1)) if match else None
-
-
-def sizes_per_perfume(
-    message_text: str, results: "list[name_index.Scored]"
-) -> dict[str, int]:
-    """
-    Which decant size the customer asked for, PER perfume.
-
-    "9pm rebel 3ml, khamrah 5ml, kaaf 10ml" is three different sizes, and
-    reading a single size for the whole message quoted 3ml for all three —
-    two wrong prices on one order. Each product takes the size written
-    immediately after its name, which is how people write these lists.
-
-    A size written before the names instead ("3ml of sauvage and eros") is
-    picked up by the fallback, and a message with one size and several
-    products still gives that size to all of them.
-    """
-    _tokens, sizes = name_index.tokenize_message_with_sizes(message_text)
-    if not sizes or not results:
-        return {}
-
-    placed = [s for s in results if s.consumed]
-    if not placed:
-        return {}
-
-    # Which side of the name the size is written on is a property of the
-    # whole message, not of each product, and both conventions are common:
-    #
-    #     "9pm rebel 3ml, kaaf 10ml"          size trails the name
-    #     "10ML - Zenith Deep / 5ML - Khair"  size leads it
-    #
-    # Deciding per product cannot work — in the first message the "3ml" sits
-    # immediately before "kaaf" as well as after "rebel". Whether the very
-    # first size appears before or after the first product name settles it
-    # for the message.
-    first_name = min(min(s.consumed) for s in placed)
-    leads = sizes[0][0] <= first_name
-
-    per_perfume: dict[str, int] = {}
-    for scored in placed:
-        start, end = min(scored.consumed), max(scored.consumed)
-        if leads:
-            candidates = [(pos, ml) for pos, ml in sizes if pos <= start]
-            chosen = max(candidates) if candidates else min(sizes)
-        else:
-            candidates = [(pos, ml) for pos, ml in sizes if pos > end]
-            chosen = min(candidates) if candidates else max(
-                [(pos, ml) for pos, ml in sizes if pos <= end] or sizes
-            )
-        per_perfume[scored.perfume_id] = chosen[1]
-
-    return per_perfume
 
 
 # --- Intent: is this an ask, or just a mention? -----------------------------
@@ -382,11 +327,6 @@ def _result_from(
     message_text: str = "",
 ) -> MatchResult:
     scores = [(s.perfume_id, round(s.score, 2)) for s in (all_scores or [])]
-    # Worked out here because only the index knows where each name sat in
-    # the message, and that position is what pairs a name with its size.
-    sizes = sizes_per_perfume(
-        message_text, [scored_by_pid[p] for p in picked if p in scored_by_pid]
-    )
 
     if len(picked) == 1:
         s = scored_by_pid.get(picked[0])
@@ -399,7 +339,6 @@ def _result_from(
             closing=closing,
             llm_unavailable=llm_unavailable,
             scores=scores,
-            sizes=sizes,
         )
 
     top = scored_by_pid.get(picked[0]) if picked else None
@@ -412,7 +351,6 @@ def _result_from(
         closing=closing,
         llm_unavailable=llm_unavailable,
         scores=scores,
-        sizes=sizes,
     )
 
 

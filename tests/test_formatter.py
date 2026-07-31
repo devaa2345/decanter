@@ -105,58 +105,36 @@ class TestBuildPriceCard:
         assert card.index(SHIPPING_CARD) < card.index(WILL_CONTACT_LINE)
 
 
-class TestBuildPriceCardWithRequestedSize:
+class TestSizeInMessageNeverNarrowsTheCard:
     """
-    build_price_card's requested_ml param (parsed from the customer's
-    message by app.matcher.extract_requested_size_ml) — showing ONLY the
-    size they named, with delivery cost added per region and the grand
-    total shown alongside it, instead of the full size grid.
+    A customer who writes "9pm rebel 3ml" is telling us which size they have
+    in mind — not asking us to hide the other five. The card always shows
+    the full grid so they can see 5ml is only a little more, which is how a
+    decant shop sells a bigger decant. build_price_card therefore takes no
+    size argument at all: there is no code path that can narrow it.
     """
 
     # Real catalog id — has 3/5/8/10/20/30ml decant tiers + a 100ml_full,
-    # all distinct prices (150/210/310/390/700/950/2800).
+    # all distinct prices.
     PID = "afnan9pm_rebel"
 
-    def test_requested_size_present_shows_only_that_size(self):
-        card = build_price_card(self.PID, requested_ml=3)
-        prices = PERFUMES[self.PID]["prices"]
-        assert f"3ml  ₹{prices['3ml']:,}" in card
-        assert f"₹{prices['5ml']:,}" not in card
-        assert f"₹{prices['10ml']:,}" not in card
-        assert "Full 100ml" not in card
+    def test_card_takes_no_size_argument(self):
+        with pytest.raises(TypeError):
+            build_price_card(self.PID, None, None, 3)
 
-    def test_requested_size_adds_delivery_and_grand_total_per_region(self):
-        card = build_price_card(self.PID, requested_ml=3)
-        price = PERFUMES[self.PID]["prices"]["3ml"]
-        assert "Delivery + grand total:" in card
-        assert f"₹65 - Delhi NCR - Total ₹{price + 65:,}" in card
-        assert f"₹80 - Rest of India - Total ₹{price + 80:,}" in card
-        assert f"₹100 - J&K, NE, Lakshadweep & Andaman - Total ₹{price + 100:,}" in card
-
-    def test_requested_size_replaces_generic_shipping_card(self):
-        """The generic no-total shipping card shouldn't also appear
-        alongside the per-region grand totals — one or the other."""
-        card = build_price_card(self.PID, requested_ml=3)
-        assert SHIPPING_CARD not in card
-
-    def test_requested_size_not_offered_falls_back_to_full_grid(self):
-        """This perfume doesn't come in 9999ml — falls back to showing
-        every size it DOES offer, same as if no size had been named,
-        rather than a dead end."""
-        card = build_price_card(self.PID, requested_ml=9999)
-        assert card == build_price_card(self.PID)
-
-    def test_no_requested_size_is_unaffected(self):
-        """Sanity: omitting requested_ml behaves exactly as before."""
+    def test_every_tier_is_always_shown(self):
         card = build_price_card(self.PID)
-        assert "Delivery + grand total:" not in card
-        assert SHIPPING_CARD in card
+        for size, price in PERFUMES[self.PID]["prices"].items():
+            assert f"₹{price:,}" in card
+        assert "Full 100ml" in card
 
-    def test_full_bottle_size_requested(self):
-        card = build_price_card(self.PID, requested_ml=100)
-        price = PERFUMES[self.PID]["prices"]["100ml_full"]
-        assert f"Full 100ml  ₹{price:,}" in card
-        assert f"₹{PERFUMES[self.PID]['prices']['3ml']:,}" not in card
+    def test_generic_shipping_card_not_per_size_totals(self):
+        """Per-region grand totals only made sense when one size was singled
+        out; with the whole grid shown there is nothing single to total, so
+        the generic shipping card is what appears."""
+        card = build_price_card(self.PID)
+        assert SHIPPING_CARD in card
+        assert "Delivery + grand total:" not in card
 
 
 class TestBuildMultiPriceCard:
@@ -221,26 +199,14 @@ class TestBuildMultiPriceCard:
             assert risky_char not in card
 
 
-class TestBuildMultiPriceCardWithRequestedSize:
+class TestMultiCardAlwaysShowsEverySize:
     """
-    build_multi_price_card's requested_ml param — every candidate that
-    offers the requested size gets one compact line, and they're all
-    combined into ONE subtotal + one shared delivery/grand-total block
-    (see its docstring). A candidate that doesn't offer that size gets a
-    brief note instead of its full grid or being silently dropped. Only
-    falls back to the full comparison grid when NONE of the candidates
-    offer the requested size at all.
-
-    Regression coverage for the real production bug: "Rare Carbon 3ml"
-    matched 5 largely unrelated candidates, and because one of them
-    (Ajmal Carbon EDP) only comes as a full bottle, the old all-or-nothing
-    logic dumped the FULL size grid for every one of the 5 instead of
-    just noting that one candidate and answering cleanly for the rest.
+    Same rule for a multi-product reply: each perfume gets its whole grid,
+    under one shared shipping card. Replaces the old requested_ml behaviour
+    that collapsed every candidate to a single named size — see
+    TestSizeInMessageNeverNarrowsTheCard for why.
     """
 
-    # Real "9pm" family ids (see TestNinePMFamilyAmbiguity) — all four have
-    # 3/5/8/10/20/30ml, but only 3 of the 4 have a 100ml_full (afnanafnan_9pm
-    # doesn't), which is exactly the partial-availability case below.
     FAMILY = [
         "afnan9pm_rebel",
         "afnanafnan_9pm",
@@ -248,49 +214,21 @@ class TestBuildMultiPriceCardWithRequestedSize:
         "afnan9pm_elixir_parfum",
     ]
 
-    def test_all_candidates_have_size_shows_one_combined_total(self):
-        card = build_multi_price_card(self.FAMILY, requested_ml=3)
-        total = 0
-        for pid in self.FAMILY:
-            price = PERFUMES[pid]["prices"]["3ml"]
-            total += price
-            assert f"3ml  ₹{price:,}" in card
-        assert f"Subtotal  ₹{total:,}" in card
-        assert f"Total ₹{total + 65:,}" in card  # Delhi NCR region
-        assert "Delivery + grand total:" in card
-        assert SHIPPING_CARD not in card
-        # No full grid anywhere - only the requested 3ml line per candidate,
-        # never any of the other tiers these perfumes also come in.
-        assert "5ml " not in card
-        assert "8ml " not in card
-        assert "10ml " not in card
-        assert "20ml " not in card
-        assert "30ml " not in card
+    def test_multi_card_takes_no_size_arguments(self):
+        with pytest.raises(TypeError):
+            build_multi_price_card(self.FAMILY, None, None, 3)
 
-    def test_partial_availability_combines_the_available_ones_and_notes_the_rest(self):
-        """afnanafnan_9pm has no 100ml_full — requesting 100ml for the
-        whole family must still total the 3 that DO offer it, and just note
-        that afnanafnan_9pm doesn't, instead of falling back to the full
-        grid for every candidate (the exact live bug this replaced)."""
-        card = build_multi_price_card(self.FAMILY, requested_ml=100)
-        priced_pids = [pid for pid in self.FAMILY if pid != "afnanafnan_9pm"]
-        total = sum(PERFUMES[pid]["prices"]["100ml_full"] for pid in priced_pids)
-
-        assert f"Subtotal  ₹{total:,}" in card
-        assert "Delivery + grand total:" in card
-        assert "AFNAN AFNAN 9PM - NOT AVAILABLE IN 100ML" in card.upper()
-        assert card != build_multi_price_card(self.FAMILY)
-
-    def test_no_candidate_has_the_size_falls_back_to_full_grid(self):
-        """None of the family comes in an absurd 47ml - nothing to total,
-        so this falls back to the full grid for all, same as no size named."""
-        card = build_multi_price_card(self.FAMILY, requested_ml=47)
-        assert card == build_multi_price_card(self.FAMILY)
-
-    def test_no_requested_size_is_unaffected(self):
+    def test_each_perfume_shows_all_of_its_tiers(self):
         card = build_multi_price_card(self.FAMILY)
+        for pid in self.FAMILY:
+            for size, price in PERFUMES[pid]["prices"].items():
+                assert f"₹{price:,}" in card
+
+    def test_one_shared_shipping_card_and_no_subtotal(self):
+        card = build_multi_price_card(self.FAMILY)
+        assert card.count("Prepaid only") == 1
+        assert "Subtotal" not in card
         assert "Delivery + grand total:" not in card
-        assert SHIPPING_CARD in card
 
 
 class TestFixedMessages:

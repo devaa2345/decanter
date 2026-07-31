@@ -55,10 +55,9 @@ def reload_catalog() -> None:
     build_index()
 
 
-# Shipping rates by region (INR) — the single source of truth for both the
-# text SHIPPING_CARD below and the per-region grand totals shown when a
-# customer names one specific ml size (see app.formatter's requested_ml
-# handling): keeping one dict means the two can never drift apart.
+# Shipping rates by region (INR) — the single source of truth for the text
+# SHIPPING_CARD built from it just below, so the rates and the card the
+# customer reads can never drift apart.
 SHIPPING_RATES: dict[str, int] = {
     "Delhi NCR": 65,
     "Rest of India": 80,

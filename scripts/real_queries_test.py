@@ -43,8 +43,15 @@ class Case:
     message: str
     # Substrings that must each appear in some matched product's name.
     expect: list[str] = field(default_factory=list)
-    # product-name substring -> ml the customer asked for it.
+    # Sizes the customer wrote, kept only as documentation of the real
+    # message. They no longer affect the reply — every card shows the full
+    # size grid (see app.formatter._build_card_block).
     sizes: dict[str, int] = field(default_factory=dict)
+    # Product-name substrings that may legitimately come back on top of
+    # `expect` — a genuinely ambiguous mention where showing the family is
+    # the right answer. Anything else returned counts as an extra, i.e. a
+    # product the customer did not ask for.
+    allow_extra: list[str] = field(default_factory=list)
     # True when the right answer is to say nothing (not an order).
     expect_silence: bool = False
     note: str = ""
@@ -282,17 +289,16 @@ async def run_case(case: Case) -> tuple[list[str], list[str], list[str], dict]:
     hit = [e for e in case.expect if any(e in n for n in lowered)]
     missed = [e for e in case.expect if e not in hit]
 
-    size_errors = []
-    by_name = {PERFUMES[p]["display_name"].lower(): p for p in ids if p in PERFUMES}
-    for fragment, want in case.sizes.items():
-        pid = next((p for n, p in by_name.items() if fragment in n), None)
-        if pid is None:
-            continue
-        got = result.sizes.get(pid)
-        if got != want:
-            size_errors.append(f"{fragment}: wanted {want}ml, got {got}")
+    # Exactness: what came back must BE what was asked for. A reply padded
+    # with products the customer never named is its own kind of wrong — it
+    # buries the ones they did name and reads as the bot guessing.
+    permitted = case.expect + case.allow_extra
+    extras = [
+        name for name, low in zip(found, lowered)
+        if not any(e in low for e in permitted)
+    ]
 
-    return found, hit, missed, {"sizes": size_errors, "layer": result.layer}
+    return found, hit, missed, {"extras": extras, "layer": result.layer}
 
 
 async def main_async(use_groq: bool) -> int:
@@ -300,7 +306,7 @@ async def main_async(use_groq: bool) -> int:
         settings.GROQ_API_KEY = ""
 
     total_expected = total_hit = 0
-    total_size_errors = 0
+    total_extras = 0
     failures = []
 
     print()
@@ -313,9 +319,9 @@ async def main_async(use_groq: bool) -> int:
         found, hit, missed, extra = await run_case(case)
         total_expected += len(case.expect)
         total_hit += len(hit)
-        total_size_errors += len(extra["sizes"])
+        total_extras += len(extra["extras"])
 
-        ok = not missed and not extra["sizes"]
+        ok = not missed and not extra["extras"]
         mark = "PASS" if ok else "FAIL"
         print()
         print(f"  [{mark}] {case.label}  —  {len(hit)}/{len(case.expect)} products"
@@ -325,15 +331,15 @@ async def main_async(use_groq: bool) -> int:
         if missed:
             print(f"         MISSED: {', '.join(missed)}")
             failures.append((case.label, "missed", missed))
-        if extra["sizes"]:
-            print(f"         SIZE:   {'; '.join(extra['sizes'])}")
-            failures.append((case.label, "size", extra["sizes"]))
+        if extra["extras"]:
+            print(f"         EXTRA:  {'; '.join(extra['extras'])}")
+            failures.append((case.label, "extra", extra["extras"]))
 
     print()
     print("  " + "-" * 90)
     print(f"  Products correctly identified : {total_hit}/{total_expected}"
           f"  ({total_hit / total_expected * 100:.1f}%)")
-    print(f"  Size errors                   : {total_size_errors}")
+    print(f"  Products never asked for      : {total_extras}")
     print(f"  Messages fully correct        : {len(CASES) - len({f[0] for f in failures})}/{len(CASES)}")
     print()
     return 0 if not failures else 1
