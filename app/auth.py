@@ -11,7 +11,7 @@ belt-and-suspenders, since this dashboard is meant for a single owner login.
 import asyncio
 import logging
 
-from fastapi import Header, HTTPException
+from fastapi import Header, HTTPException, Request
 
 from app.config import settings
 from app.db import get_client
@@ -19,7 +19,44 @@ from app.db import get_client
 logger = logging.getLogger(__name__)
 
 
-async def require_owner(authorization: str | None = Header(default=None)) -> str:
+LOCAL_OWNER = "local@localhost"
+
+
+def _is_local_only(request: Request) -> bool:
+    """
+    True when this request cannot be coming from the internet AND there is
+    no owner account to authenticate against.
+
+    The dashboard authenticates against Supabase Auth. With Supabase unset
+    there is no account, no token can ever be issued, and every /api/admin
+    route answers 401 forever — which would make the console unusable on a
+    developer's machine, including the chat tester that used to run with no
+    auth at all as its own local script.
+
+    Three conditions, all required, because getting this wrong exposes the
+    catalog to the internet:
+
+      1. Supabase is not configured — so this is not a real deployment, and
+         there is no owner account being bypassed.
+      2. The request came from loopback.
+      3. No X-Forwarded-For header — anything reaching a deployed app goes
+         through a proxy that sets one, so its absence is a second, harder
+         signal that nothing forwarded this.
+
+    A deployed instance has Supabase configured and fails condition 1 before
+    the others are even considered.
+    """
+    if get_client() is not None:
+        return False
+    if request.headers.get("x-forwarded-for") or request.headers.get("x-real-ip"):
+        return False
+    host = (request.client.host if request.client else "") or ""
+    return host in {"127.0.0.1", "::1", "localhost"}
+
+
+async def require_owner(
+    request: Request, authorization: str | None = Header(default=None)
+) -> str:
     """
     FastAPI dependency: validates the Bearer JWT against Supabase Auth and
     confirms it belongs to the configured owner account.
@@ -27,6 +64,9 @@ async def require_owner(authorization: str | None = Header(default=None)) -> str
     Returns the authenticated user's email on success.
     Raises HTTPException(401/403/503) otherwise.
     """
+    if _is_local_only(request):
+        return LOCAL_OWNER
+
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Missing bearer token")
 

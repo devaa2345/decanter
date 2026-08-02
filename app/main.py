@@ -83,6 +83,13 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.exception("Failed to pre-build the perfume name index — it will build on first use")
 
+    try:
+        from app import messages
+
+        await asyncio.to_thread(messages.load_from_db)
+    except Exception:
+        logger.exception("Could not load saved bot messages — using the built-in wording")
+
     # The handoff pause is the one feature whose failure is invisible from
     # the outside: a bot that never stops talking looks exactly like a bot
     # nobody has taken a conversation away from. Reported from production
@@ -105,8 +112,8 @@ async def lifespan(app: FastAPI):
 
 # --- FastAPI app ---
 app = FastAPI(
-    title="Decanter Price Bot",
-    description="WhatsApp price-query bot for Sovereign Scents",
+    title="Sovereign Chat Bot",
+    description="WhatsApp price bot for Sovereign Scents",
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -122,7 +129,9 @@ app.mount(
 
 @app.get("/", include_in_schema=False)
 async def root_redirect():
-    return RedirectResponse(url="/dashboard/index.html")
+    # One URL for everything the owner does — catalog, upload, message
+    # editor and the WhatsApp tester are all views of the same console.
+    return RedirectResponse(url="/dashboard/console.html")
 
 
 @app.get("/api/config")
@@ -132,10 +141,16 @@ async def public_config():
     anon key can only start an Auth login, and RLS locks every table down
     for anon access (see supabase/migrations/0001_init.sql). No secrets here.
     """
+    configured = bool(settings.SUPABASE_URL and settings.SUPABASE_ANON_KEY)
     return {
         "supabase_url": settings.SUPABASE_URL,
         "supabase_anon_key": settings.SUPABASE_ANON_KEY,
-        "configured": bool(settings.SUPABASE_URL and settings.SUPABASE_ANON_KEY),
+        "configured": configured,
+        # With no Supabase there is no account to log in to, so the console
+        # skips the login screen and the API accepts loopback requests
+        # without a token — see app.auth._is_local_only, which will not do
+        # that anywhere a request could have come from the internet.
+        "local_mode": not configured,
     }
 
 
@@ -254,6 +269,18 @@ def _log_outbound(sender: str, reply_text: str, success: bool, **context) -> Non
         f"  {extra}" if extra else "",
         reply_text,
     )
+
+
+def _message(key: str, fallback: str) -> str:
+    """The owner's wording for a fixed reply, or the shipped default — see
+    app.messages. Read at send time so a dashboard edit applies to the next
+    customer rather than the next deploy."""
+    try:
+        from app import messages
+
+        return messages.get(key) or fallback
+    except Exception:
+        return fallback
 
 
 async def _send_and_record(sender: str, reply_text: str) -> bool:
@@ -559,8 +586,8 @@ async def webhook_handler(request: Request):
     # have already read. has_been_welcomed reads that from the event log, so
     # it survives restarts and redeploys.
     if is_greeting(message_text) and not await has_been_welcomed(sender):
-        success = await _send_and_record(sender, WELCOME_MESSAGE)
-        _log_outbound(sender, WELCOME_MESSAGE, success, reason=WELCOME_LAYER)
+        success = await _send_and_record(sender, _message("welcome", WELCOME_MESSAGE))
+        _log_outbound(sender, _message("welcome", WELCOME_MESSAGE), success, reason=WELCOME_LAYER)
         await log_message_event(
             message_id=message_id,
             sender=sender,
@@ -575,8 +602,8 @@ async def webhook_handler(request: Request):
 
     # Step 4a: Non-text message types
     if message_type and message_type != "text":
-        success = await _send_and_record(sender, NON_TEXT_MESSAGE)
-        _log_outbound(sender, NON_TEXT_MESSAGE, success, reason="non_text_message_type")
+        success = await _send_and_record(sender, _message("non_text", NON_TEXT_MESSAGE))
+        _log_outbound(sender, _message("non_text", NON_TEXT_MESSAGE), success, reason="non_text_message_type")
         return Response(status_code=200, content="OK")
 
     # Step 4b: Empty or missing message text
@@ -592,8 +619,8 @@ async def webhook_handler(request: Request):
     # names and would otherwise get quoted a price card instead of an
     # order acknowledgment).
     if is_order_confirmation(message_text):
-        success = await _send_and_record(sender, ORDER_CONFIRMATION_MESSAGE)
-        _log_outbound(sender, ORDER_CONFIRMATION_MESSAGE, success, reason="order_confirmation")
+        success = await _send_and_record(sender, _message("order_confirmation", ORDER_CONFIRMATION_MESSAGE))
+        _log_outbound(sender, _message("order_confirmation", ORDER_CONFIRMATION_MESSAGE), success, reason="order_confirmation")
         await log_message_event(
             message_id=message_id,
             sender=sender,
@@ -608,8 +635,8 @@ async def webhook_handler(request: Request):
 
     # Step 6: Message too long
     if len(message_text) > settings.MAX_MESSAGE_LENGTH:
-        success = await _send_and_record(sender, FALLBACK_MESSAGE)
-        _log_outbound(sender, FALLBACK_MESSAGE, success, reason=f"too_long_{len(message_text)}_chars")
+        success = await _send_and_record(sender, _message("fallback", FALLBACK_MESSAGE))
+        _log_outbound(sender, _message("fallback", FALLBACK_MESSAGE), success, reason=f"too_long_{len(message_text)}_chars")
         return Response(status_code=200, content="OK")
 
     # Step 7: Run matching pipeline.
@@ -669,7 +696,7 @@ async def webhook_handler(request: Request):
     elif result.perfume_id:
         reply_text = build_price_card(result.perfume_id, result.opening, result.closing)
     elif is_greeting_or_catalog_request(message_text):
-        reply_text = FALLBACK_MESSAGE
+        reply_text = _message("fallback", FALLBACK_MESSAGE)
     else:
         # Nothing in the catalog matched. Before falling silent, check
         # whether the customer was nonetheless naming a perfume — one we

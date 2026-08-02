@@ -167,8 +167,43 @@ def read_decants(wb, notes: list[str]) -> dict[str, ParsedRow]:
     return rows
 
 
+# The retail sheet is typed in block capitals ("LATTAFA PETRA EDP"). Title
+# case reads as a name; these words do not survive it and are restored.
+_RETAIL_CAPS = {
+    "edp", "edt", "edc", "pp", "og", "ml", "uae", "usa", "uk", "ii", "iii", "iv",
+}
+
+
+def _retail_display_name(brand: str, name: str) -> str:
+    """A retail-sheet row as a display name a customer would recognize.
+
+    Capitals are how stock is listed, not how a perfume is written, and this
+    string goes straight onto the price card the customer reads.
+    """
+    words = []
+    for word in f"{brand} {name}".split():
+        lowered = word.lower().strip(".,")
+        words.append(word.upper() if lowered in _RETAIL_CAPS else word.title())
+    return " ".join(words)
+
+
 def merge_retail_packs(wb, rows: dict[str, ParsedRow], notes: list[str]) -> None:
-    """Attach full-bottle prices onto the decant product they belong to."""
+    """
+    Attach full-bottle prices onto the decant product they belong to — and
+    where there is no such product, create one.
+
+    That second half is not a nicety. 43 rows on this sheet are perfumes the
+    shop sells only as a full bottle: they have a name and a real price and
+    no decant entry anywhere, so before this they reached the catalog as
+    nothing at all and a customer asking for Lattafa Petra or Naseem Aurora
+    got silence. Attaching-only made sense when the retail sheet was assumed
+    to be a full-bottle add-on to the decant range; it is also a product
+    list in its own right.
+
+    A row becomes its own product ONLY when nothing already matches it, so
+    the fuzzy attach above still wins wherever the two sheets are naming the
+    same thing — otherwise every full bottle would arrive twice.
+    """
     if RETAIL_SHEET not in wb.sheetnames:
         notes.append(f"sheet {RETAIL_SHEET!r} not found — no full-bottle prices")
         return
@@ -194,7 +229,7 @@ def merge_retail_packs(wb, rows: dict[str, ParsedRow], notes: list[str]) -> None
 
     keys = {_match_key(r.brand + " " + r.name): k for k, r in rows.items()}
     candidates = list(keys)
-    attached = orphan = 0
+    attached = created = 0
 
     for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
         def cell(key: str) -> str:
@@ -203,7 +238,7 @@ def merge_retail_packs(wb, rows: dict[str, ParsedRow], notes: list[str]) -> None
 
         brand, name = cell("brand"), cell("name")
         qty, price = _price(cell("qty")), _price(cell("price"))
-        if not name or not price or not qty:
+        if not name or not price:
             continue
 
         probe = _match_key(f"{brand} {name}")
@@ -211,16 +246,33 @@ def merge_retail_packs(wb, rows: dict[str, ParsedRow], notes: list[str]) -> None
         if target is None:
             hit = process.extractOne(probe, candidates, scorer=fuzz.ratio)
             target = keys[hit[0]] if hit and hit[1] >= _RETAIL_MATCH else None
-        if target is None:
-            orphan += 1
+
+        # A size the sheet left blank still has to be sellable. The key
+        # carries no number, which app.formatter renders as "Full bottle"
+        # rather than inventing a millilitre figure nobody wrote down.
+        size_key = f"{qty}ml_full" if qty else "ml_full"
+
+        if target is not None:
+            rows[target].prices[size_key] = price
+            attached += 1
             continue
 
-        rows[target].prices[f"{qty}ml_full"] = price
-        attached += 1
+        # Nothing to attach it to — so this row IS the product.
+        display = _retail_display_name(brand, name)
+        key = normalize_message(display)
+        if key in rows:
+            rows[key].prices.setdefault(size_key, price)
+            continue
+        rows[key] = ParsedRow(
+            brand=brand.title(), name=name.title(), clone_of=None, prices={size_key: price}
+        )
+        keys[probe] = key
+        candidates.append(probe)
+        created += 1
 
     notes.append(
-        f"{RETAIL_SHEET.strip()}: {attached} full-bottle prices attached, "
-        f"{orphan} sold only as a full bottle (no decant entry)"
+        f"{RETAIL_SHEET.strip()}: {attached} full-bottle prices attached to a decant "
+        f"product, {created} added as full-bottle-only products"
     )
 
 

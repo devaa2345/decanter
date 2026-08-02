@@ -35,6 +35,13 @@ export async function getSession() {
 }
 
 export async function requireSession() {
+  // With Supabase unset there is no account to sign in to. The API accepts
+  // loopback requests in that state (see app.auth._is_local_only), so
+  // bouncing to a login screen nobody can pass would just make the console
+  // unusable on a developer machine.
+  const config = await getConfig();
+  if (config.local_mode) return { access_token: "local" };
+
   const session = await getSession();
   if (!session) {
     window.location.href = "/dashboard/login.html";

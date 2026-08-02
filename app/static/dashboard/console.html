@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en" data-theme="auto">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sovereign Scents — Console</title>
+  <link rel="stylesheet" href="/dashboard/css/console.css" />
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <h1>Sovereign Scents</h1>
+      <p class="sub">Sovereign chat bot</p>
+    </div>
+    <nav class="nav" id="nav" aria-label="Sections">
+      <button data-view="overview"><span class="ico">◈</span> Overview</button>
+      <button data-view="catalog"><span class="ico">☰</span> Catalog <span class="tag" id="nav-count"></span></button>
+      <button data-view="add"><span class="ico">＋</span> Add perfume</button>
+      <button data-view="upload"><span class="ico">↥</span> Upload sheet</button>
+      <button data-view="messages"><span class="ico">✎</span> Bot messages</button>
+      <button data-view="tester"><span class="ico">▣</span> Chat tester</button>
+      <button data-view="settings"><span class="ico">⚙</span> Settings</button>
+    </nav>
+    <div class="sidebar-foot">
+      <button class="btn ghost sm" id="theme-btn" title="Light, dark, or follow the system">◐ Theme</button>
+      <button class="btn ghost sm" id="signout-btn">Sign out</button>
+    </div>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <h2 id="view-title">Overview</h2>
+      <span class="spacer"></span>
+      <span id="status-pills" class="row-flex"></span>
+    </header>
+    <div class="content" id="content"><div class="empty"><span class="spinner"></span></div></div>
+  </div>
+</div>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<!-- Edit one perfume. Also used for "add", with a different title. -->
+<dialog id="edit-dialog">
+  <header><h3 id="edit-title">Edit perfume</h3></header>
+  <div class="body">
+    <div id="edit-warning"></div>
+    <div class="grid two">
+      <div class="field">
+        <label for="edit-brand">Brand</label>
+        <input type="text" id="edit-brand" list="brand-list" autocomplete="off" />
+        <span class="hint">Pick an existing brand where you can — a new spelling becomes a new brand.</span>
+      </div>
+      <div class="field">
+        <label for="edit-name">Perfume name</label>
+        <input type="text" id="edit-name" autocomplete="off" />
+      </div>
+    </div>
+    <div class="field">
+      <label for="edit-clone">Clone of <span class="muted">(optional)</span></label>
+      <input type="text" id="edit-clone" autocomplete="off" />
+      <span class="hint">The designer original this is inspired by. Customers search for that name too.</span>
+    </div>
+    <div class="field">
+      <label>Decant prices <span class="muted">₹ — leave blank for a size you don't sell</span></label>
+      <div class="sizes" id="edit-sizes"></div>
+    </div>
+    <div class="field">
+      <label>Full bottle <span class="muted">(optional)</span></label>
+      <div class="row-flex">
+        <input type="number" id="edit-full-ml" placeholder="100" style="max-width:7rem" />
+        <span class="muted">ml at ₹</span>
+        <input type="number" id="edit-full-price" placeholder="2850" style="max-width:9rem" />
+      </div>
+      <span class="hint">Leave the ml blank and the card prints "Full bottle" instead of a size.</span>
+    </div>
+  </div>
+  <footer>
+    <button class="btn" data-close>Cancel</button>
+    <button class="btn primary" id="edit-save">Save</button>
+  </footer>
+</dialog>
+
+<!-- The price card exactly as a customer receives it, for pasting into a chat. -->
+<dialog id="card-dialog">
+  <header><h3>Copy price card</h3></header>
+  <div class="body">
+    <p class="muted" style="margin:0;font-size:.85rem">
+      This is the real thing — rendered by the same code the bot sends with, so what you
+      paste is what a customer would have got.
+    </p>
+    <div class="field">
+      <label>Trim to these sizes <span class="muted">(none ticked = the full grid, as the bot sends)</span></label>
+      <div class="row-flex" id="card-sizes"></div>
+    </div>
+    <div class="row-flex" id="card-meta"></div>
+    <pre class="preview" id="card-text" style="margin:0"></pre>
+  </div>
+  <footer>
+    <button class="btn" data-close>Close</button>
+    <button class="btn primary" id="card-copy">⧉ Copy to clipboard</button>
+  </footer>
+</dialog>
+
+<!-- One change applied to many perfumes. Operations, not field values. -->
+<dialog id="bulk-dialog">
+  <header><h3>Edit all selected</h3></header>
+  <div class="body">
+    <div class="note info" id="bulk-count"></div>
+    <div class="field">
+      <label>Set a size's price on all of them</label>
+      <div class="sizes" id="bulk-set-prices"></div>
+      <span class="hint">Only the boxes you fill in are applied. This overwrites that size everywhere.</span>
+    </div>
+    <div class="field">
+      <label>Move every price</label>
+      <div class="row-flex">
+        <input type="number" id="bulk-pct" placeholder="0" style="max-width:6rem" />
+        <span class="muted">% &nbsp;and/or&nbsp; ₹</span>
+        <input type="number" id="bulk-flat" placeholder="0" style="max-width:7rem" />
+      </div>
+      <span class="hint">Negative numbers cut. Rounded to whole rupees, never below ₹1.</span>
+    </div>
+    <div class="field">
+      <label>Stop selling these sizes</label>
+      <div class="row-flex" id="bulk-remove-sizes"></div>
+      <span class="hint">A perfume that would be left with no prices at all is skipped and reported.</span>
+    </div>
+    <div class="field">
+      <label>Set the brand <span class="muted">(optional)</span></label>
+      <input type="text" id="bulk-brand" list="brand-list" placeholder="leave blank to keep each one's own" autocomplete="off" />
+    </div>
+    <div id="bulk-result"></div>
+  </div>
+  <footer>
+    <button class="btn" data-close>Cancel</button>
+    <button class="btn primary" id="bulk-apply">Apply to selected</button>
+  </footer>
+</dialog>
+
+<datalist id="brand-list"></datalist>
+
+<script type="module" src="/dashboard/js/console.js"></script>
+</body>
+</html>

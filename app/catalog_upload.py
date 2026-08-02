@@ -49,6 +49,16 @@ class CatalogParseError(Exception):
     """Raised for problems with a specific upload/version request (bad file, bad id, wrong state)."""
 
 
+class CatalogRemovalWarning(Exception):
+    """A publish that would delete a large part of the catalog, refused
+    pending confirmation. Carries the count so the caller can say how many
+    rather than just that it was 'a lot' — see MAX_SILENT_REMOVALS."""
+
+    def __init__(self, message: str, removed: int) -> None:
+        super().__init__(message)
+        self.removed = removed
+
+
 # --- Header recognition -----------------------------------------------------
 
 BRAND_HEADERS = {"brand"}
@@ -94,45 +104,184 @@ def _find_column_map(headers: list[str]) -> dict:
     return col_map
 
 
-def _read_rows(filename: str, content: bytes) -> tuple[list[str], list[list]]:
-    """Parse the raw file into (headers, data_rows), scanning for the header row."""
+# Sheets in the shop's workbook that are not a customer price list, matched
+# case-insensitively on the sheet name. "Testers" is stock-on-hand for the
+# owner and a tester price is not what a customer pays; the rest hold no
+# product rows at all.
+SKIP_SHEETS = {"testers", "sync log", "decant bottle pics", "customer reviews", "retail packs"}
+
+# Precedence between sheets, most authoritative first. A product listed on
+# more than one sheet keeps the FIRST sheet's prices — the men's/unisex
+# sheet is far larger and more recently priced, and one row deciding a
+# product's whole price list beats two rows disagreeing about it. Sheets not
+# named here keep their workbook order, after these.
+SHEET_PRECEDENCE = ["decant sheet men-unisex", "for women", "new decant additions"]
+
+# The retail sheet uses its own headers and its own shape: one row per
+# bottle size rather than a row of size columns.
+RETAIL_SHEET_NAME = "retail packs"
+RETAIL_BRAND_HEADERS = {"brand name"}
+RETAIL_NAME_HEADERS = {"perfume name"}
+RETAIL_QTY_HEADERS = {"quantity (ml)", "quantity", "qty (ml)", "qty"}
+RETAIL_PRICE_HEADERS = {"price", "mrp", "retail price"}
+
+
+def _sheet_sort_key(name: str) -> tuple[int, int]:
+    cleaned = name.strip().lower()
+    try:
+        return (0, SHEET_PRECEDENCE.index(cleaned))
+    except ValueError:
+        return (1, 0)
+
+
+def _find_header_row(all_rows: list[list]) -> int | None:
+    """The real sheet has promo/shipping text above the actual table, so the
+    header is scanned for rather than assumed to be row 0."""
+    for i, row in enumerate(all_rows[:20]):
+        lowered = {str(c).strip().lower().rstrip() for c in row if c}
+        if lowered & (BRAND_HEADERS | NAME_HEADERS):
+            return i
+    return None
+
+
+def _read_sheets(filename: str, content: bytes) -> list[tuple[str, list[str], list[list]]]:
+    """
+    Every product sheet in the upload, as (sheet name, headers, data rows),
+    most authoritative first.
+
+    This reads the WHOLE workbook. It used to read openpyxl's `wb.active` —
+    one sheet — which for the shop's real export means the men's/unisex
+    sheet and nothing else. Uploading that file and publishing it deleted
+    the 208 products on the women's sheet from the live bot, dropped every
+    full-bottle price, and applied none of the men's-wins precedence, all
+    without an error: the diff simply said "removed: 208" as though that
+    were a fact about the sheet rather than a fact about the parser.
+
+    A CSV is still one table — Google Sheets exports one tab at a time — so
+    it comes back as a single unnamed sheet.
+    """
     ext = filename.lower().rsplit(".", 1)[-1] if filename and "." in filename else ""
 
     if ext == "csv":
         text = content.decode("utf-8-sig", errors="replace")
         all_rows = [row for row in csv.reader(io.StringIO(text))]
-    elif ext in ("xlsx", "xlsm"):
-        import openpyxl
+        header_idx = _find_header_row(all_rows)
+        if header_idx is None:
+            raise CatalogParseError(
+                "Could not find a header row containing 'Brand' or 'Fragrance Name' "
+                "in the first 20 rows."
+            )
+        return [("", all_rows[header_idx], all_rows[header_idx + 1 :])]
 
-        wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True, read_only=True)
-        sheet = wb.active
-        all_rows = [
-            ["" if c is None else str(c) for c in row] for row in sheet.iter_rows(values_only=True)
-        ]
-    else:
+    if ext not in ("xlsx", "xlsm"):
         raise CatalogParseError(
             f"Unsupported file type '.{ext}'. Please upload a .xlsx or .csv export of the sheet "
             "(PDF exports can't be parsed reliably — use File > Download in Google Sheets instead)."
         )
 
-    # The real sheet has promo/shipping text above the actual table (see
-    # SUPERSEDED source PDFs), so scan the first few rows for the header
-    # rather than assuming row 0 is it.
-    header_idx = None
-    for i, row in enumerate(all_rows[:20]):
-        lowered = {str(c).strip().lower() for c in row if c}
-        if lowered & (BRAND_HEADERS | NAME_HEADERS):
-            header_idx = i
-            break
+    import openpyxl
 
-    if header_idx is None:
+    wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True, read_only=True)
+    found: list[tuple[str, list[str], list[list]]] = []
+
+    for sheet_name in sorted(wb.sheetnames, key=_sheet_sort_key):
+        if sheet_name.strip().lower() in SKIP_SHEETS:
+            continue
+        rows = [
+            ["" if c is None else str(c) for c in row]
+            for row in wb[sheet_name].iter_rows(values_only=True)
+        ]
+        header_idx = _find_header_row(rows)
+        if header_idx is None:
+            continue  # not a product sheet — pictures, reviews, a change log
+        found.append((sheet_name.strip(), rows[header_idx], rows[header_idx + 1 :]))
+
+    if not found:
         raise CatalogParseError(
-            "Could not find a header row containing 'Brand' or 'Fragrance Name' in the first 20 rows."
+            "No sheet in this workbook has a header row containing 'Brand' or "
+            "'Fragrance Name'. Sheets found: " + ", ".join(wb.sheetnames)
         )
 
-    headers = all_rows[header_idx]
-    data_rows = all_rows[header_idx + 1 :]
+    return found
+
+
+def _read_rows(filename: str, content: bytes) -> tuple[list[str], list[list]]:
+    """The first product sheet, as (headers, data rows).
+
+    Kept for callers that only ever deal in one table — a CSV export, or a
+    single-sheet check. Anything importing a real workbook wants
+    _read_sheets, which returns all of them: reading one sheet of six is
+    precisely the bug this module was repaired for.
+    """
+    sheets = _read_sheets(filename, content)
+    _name, headers, data_rows = sheets[0]
     return headers, data_rows
+
+
+def _read_retail_packs(filename: str, content: bytes) -> list[tuple[str, str, int | None, int]]:
+    """
+    The Retail Packs sheet as (brand, name, quantity_ml, price).
+
+    Kept separate because it is shaped differently — a Quantity and a Price
+    column rather than a column per size — and because it is the only place
+    43 of the shop's perfumes appear at all. Returns [] when the sheet is
+    absent, which is the normal case for a single-tab CSV export.
+    """
+    ext = filename.lower().rsplit(".", 1)[-1] if filename and "." in filename else ""
+    if ext not in ("xlsx", "xlsm"):
+        return []
+
+    import openpyxl
+
+    wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True, read_only=True)
+    sheet_name = next(
+        (n for n in wb.sheetnames if n.strip().lower() == RETAIL_SHEET_NAME), None
+    )
+    if sheet_name is None:
+        return []
+
+    out: list[tuple[str, str, int | None, int]] = []
+    cols: dict[str, int] = {}
+    for row in wb[sheet_name].iter_rows(values_only=True):
+        labels = {
+            str(c).strip().lower().rstrip(): i
+            for i, c in enumerate(row)
+            if c is not None and str(c).strip()
+        }
+        if not cols:
+            brand_col = next((labels[h] for h in RETAIL_BRAND_HEADERS if h in labels), None)
+            name_col = next((labels[h] for h in RETAIL_NAME_HEADERS if h in labels), None)
+            if brand_col is None or name_col is None:
+                continue
+            cols = {
+                "brand": brand_col,
+                "name": name_col,
+                "qty": next((labels[h] for h in RETAIL_QTY_HEADERS if h in labels), -1),
+                "price": next((labels[h] for h in RETAIL_PRICE_HEADERS if h in labels), -1),
+            }
+            continue
+
+        def cell(key: str) -> str:
+            idx = cols.get(key, -1)
+            return str(row[idx]).strip() if 0 <= idx < len(row) and row[idx] is not None else ""
+
+        name = cell("name")
+        price = _int_or_none(cell("price"))
+        if not name or price is None:
+            continue
+        out.append((cell("brand"), name, _int_or_none(cell("qty")), price))
+
+    return out
+
+
+def _int_or_none(text: str) -> int | None:
+    cleaned = (text or "").replace(",", "").replace("₹", "").strip()
+    if not cleaned or cleaned.upper() in {"NA", "N/A", "-"}:
+        return None
+    try:
+        return int(float(cleaned))
+    except ValueError:
+        return None
 
 
 # --- Full-bottle (BNIB) free-text price parsing -----------------------------
@@ -226,6 +375,251 @@ def _parse_rows(data_rows: list[list], col_map: dict) -> tuple[list[ParsedRow], 
         parsed.append(ParsedRow(brand=brand, name=name, clone_of=clone_of, prices=prices))
 
     return parsed, warnings
+
+
+def _row_key(row: ParsedRow) -> str:
+    return normalize_message(f"{row.brand} {row.name}")
+
+
+def dedupe_first_wins(
+    sheets: list[tuple[str, list[ParsedRow]]],
+) -> tuple[list[ParsedRow], list[str], list[dict]]:
+    """
+    One row per product, resolving the ~90 the shop's sheet lists twice.
+
+    The rule, and it is the shop's own: the first sheet wins over every
+    later one, and within a sheet the first row wins. One row decides a
+    product's whole price list rather than two rows disagreeing about it.
+
+    Nothing is resolved silently. Every dropped copy comes back in
+    `clashes` — with both sets of prices, so the owner can see which
+    product is being quoted at which price and fix the sheet rather than
+    discovering it from a customer.
+    """
+    kept: dict[str, ParsedRow] = {}
+    origin: dict[str, str] = {}
+    warnings: list[str] = []
+    clashes: list[dict] = []
+
+    for sheet_name, rows in sheets:
+        for row in rows:
+            key = _row_key(row)
+            if not key:
+                continue
+            if key not in kept:
+                kept[key] = row
+                origin[key] = sheet_name
+                continue
+            if kept[key].prices != row.prices:
+                clashes.append(
+                    {
+                        "display_name": f"{kept[key].brand} {kept[key].name}".strip(),
+                        "kept_from": origin[key] or "earlier row",
+                        "kept_prices": dict(kept[key].prices),
+                        "dropped_from": sheet_name or "later row",
+                        "dropped_prices": dict(row.prices),
+                    }
+                )
+                warnings.append(
+                    f"{kept[key].brand} {kept[key].name}".strip()
+                    + f": listed again on {sheet_name or 'a later row'} with different prices"
+                    + " — kept the first"
+                )
+
+    return list(kept.values()), warnings, clashes
+
+
+# The retail sheet is typed in block capitals ("LATTAFA PETRA EDP"). Title
+# case reads as a name; these words do not survive it and are restored.
+_RETAIL_CAPS = {"edp", "edt", "edc", "pp", "og", "ml", "uae", "usa", "uk", "ii", "iii", "iv"}
+
+
+def _retail_display(brand: str, name: str) -> tuple[str, str]:
+    def fix(text: str) -> str:
+        return " ".join(
+            w.upper() if w.lower().strip(".,") in _RETAIL_CAPS else w.title()
+            for w in text.split()
+        )
+
+    return fix(brand), fix(name)
+
+
+# Words the retail sheet adds or drops freely against the decant sheet.
+# Removed from both sides before two names are compared, so "AFNAN 9PM
+# REBEL EDP" and "Afnan 9PM Rebel" are recognized as one product.
+_RETAIL_FILLER = {
+    "pour", "homme", "femme", "for", "men", "women", "man", "woman",
+    "eau", "de", "by", "the",
+}
+
+# Similarity at which two names are the same product. Applied to the
+# PRODUCT part only, with the brand checked separately — the retail sheet
+# writes "AHMED" where the decant sheet writes "Ahmed Al Maghribi", which
+# drags a whole-string comparison down far below anything usable.
+_RETAIL_NAME_MIN = 92
+
+
+def _retail_name_sig(name: str) -> str:
+    return "".join(
+        w
+        for w in normalize_message(name).split()
+        if w not in _RETAIL_CONCENTRATION and w not in _RETAIL_FILLER
+    )
+
+
+def _brands_compatible(a: frozenset, b: frozenset) -> bool:
+    """One brand written short and the other written in full is the same
+    brand. Two brands that merely overlap are not."""
+    return not a or not b or a <= b or b <= a
+
+
+def merge_retail_packs(
+    rows: list[ParsedRow], retail: list[tuple[str, str, int | None, int]]
+) -> tuple[list[ParsedRow], int, list[dict]]:
+    """
+    Fold full-bottle prices into the decant product they belong to, and
+    report every retail row that matched nothing.
+
+    Report rather than create, deliberately. 680 rows on this sheet are
+    full bottles and roughly 370 of them match no decant product by any
+    rule I would trust — but most of those are the same perfume written
+    slightly differently ("AHMED BIN SHAIKH" for "Ahmed Al Maghribi Bin
+    Sheikh"), not new products. Creating them would quietly double a large
+    part of the catalog and attach real prices to the wrong bottle, which
+    is the same silent damage this whole module is being repaired for.
+
+    So the unmatched rows come back as data. The dashboard shows them, marks
+    the ones the bot genuinely cannot answer at all, and lets the owner add
+    those deliberately — a decision made by someone who knows the stock,
+    rather than a guess made by a fuzzy ratio.
+    """
+    from rapidfuzz import fuzz, process
+
+    by_key = {_match_key(f"{r.brand} {r.name}"): r for r in rows}
+    by_name: dict[str, list[tuple[frozenset, ParsedRow]]] = {}
+    for r in rows:
+        by_name.setdefault(_retail_name_sig(r.name), []).append(
+            (frozenset(normalize_message(r.brand).split()), r)
+        )
+    full_keys = list(by_key)
+    name_keys = list(by_name)
+
+    attached = 0
+    unmatched: list[dict] = []
+
+    for brand, name, qty, price in retail:
+        probe = _match_key(f"{brand} {name}")
+        target = by_key.get(probe)
+
+        if target is None:
+            # Brand and product part compared separately, which is what
+            # recovers the abbreviated-brand rows.
+            rb = frozenset(normalize_message(brand).split())
+            rn = _retail_name_sig(name)
+            for db, candidate in by_name.get(rn, []):
+                if _brands_compatible(rb, db):
+                    target = candidate
+                    break
+            if target is None and name_keys:
+                hit = process.extractOne(rn, name_keys, scorer=fuzz.ratio)
+                if hit and hit[1] >= _RETAIL_NAME_MIN:
+                    for db, candidate in by_name[hit[0]]:
+                        if _brands_compatible(rb, db):
+                            target = candidate
+                            break
+            if target is None and full_keys:
+                hit = process.extractOne(probe, full_keys, scorer=fuzz.ratio)
+                if hit and hit[1] >= RETAIL_MATCH_MIN:
+                    target = by_key[hit[0]]
+
+        # A size the sheet left blank still has to be sellable. The key
+        # carries no number, which app.formatter renders as "Full bottle"
+        # rather than inventing a millilitre figure nobody wrote down.
+        size_key = f"{qty}ml_full" if qty else "ml_full"
+
+        if target is not None:
+            target.prices[size_key] = price
+            attached += 1
+            continue
+
+        disp_brand, disp_name = _retail_display(brand, name)
+        unmatched.append(
+            {
+                "brand": disp_brand,
+                "name": disp_name,
+                "display_name": f"{disp_brand} {disp_name}".strip(),
+                "prices": {size_key: price},
+            }
+        )
+
+    return rows, attached, unmatched
+
+
+# How close a retail-pack name has to be to a decant product to be the same
+# thing. The retail sheet is capitals with a concentration suffix
+# ("AFNAN 9PM REBEL EDP" for "Afnan 9PM Rebel").
+RETAIL_MATCH_MIN = 88
+_RETAIL_CONCENTRATION = {"edp", "edt", "edc", "parfum", "extrait", "cologne", "spray"}
+
+
+def _match_key(name: str) -> str:
+    words = [w for w in normalize_message(name).split() if w not in _RETAIL_CONCENTRATION]
+    return "".join(words)
+
+
+def parse_workbook(
+    filename: str, content: bytes
+) -> tuple[list[ParsedRow], list[str], dict]:
+    """
+    An uploaded sheet or workbook, read the way the shop's catalog is
+    actually organized: every product tab, in precedence order, duplicates
+    resolved first-wins, retail packs merged.
+
+    Returns (rows, warnings, report). The report is what the owner is shown
+    after an upload — which tabs were read, which were skipped and why, how
+    many rows each contributed, and every duplicate that was dropped.
+    Uploading a sheet used to be an act of faith; this makes it an account.
+    """
+    sheets = _read_sheets(filename, content)
+    retail = _read_retail_packs(filename, content)
+
+    per_sheet: list[tuple[str, list[ParsedRow]]] = []
+    warnings: list[str] = []
+    sheet_stats: list[dict] = []
+
+    for sheet_name, headers, data_rows in sheets:
+        try:
+            col_map = _find_column_map(headers)
+        except CatalogParseError as exc:
+            warnings.append(f"{sheet_name or 'sheet'}: {exc}")
+            sheet_stats.append({"sheet": sheet_name, "rows": 0, "skipped": str(exc)})
+            continue
+        rows, sheet_warnings = _parse_rows(data_rows, col_map)
+        per_sheet.append((sheet_name, rows))
+        warnings.extend(f"{sheet_name}: {w}" if sheet_name else w for w in sheet_warnings)
+        sheet_stats.append({"sheet": sheet_name, "rows": len(rows), "skipped": None})
+
+    if not per_sheet:
+        raise CatalogParseError(
+            "None of the sheets in this file had readable price columns."
+        )
+
+    rows, dupe_warnings, clashes = dedupe_first_wins(per_sheet)
+    warnings.extend(dupe_warnings)
+
+    rows, attached, unmatched_retail = merge_retail_packs(rows, retail)
+
+    report = {
+        "sheets_read": sheet_stats,
+        "sheets_skipped": sorted(SKIP_SHEETS),
+        "duplicate_rows_dropped": len(clashes),
+        "duplicate_details": clashes[:200],
+        "full_bottle_prices_attached": attached,
+        "full_bottle_unmatched": len(unmatched_retail),
+        "full_bottle_unmatched_details": unmatched_retail,
+        "products_after_merge": len(rows),
+    }
+    return rows, warnings, report
 
 
 # --- ID + keyword generation ---------------------------------------------
@@ -378,14 +772,13 @@ def create_pending_version(filename: str, content: bytes) -> dict:
     client = require_client()
 
     active = _get_active_catalog(client)
-    headers, data_rows = _read_rows(filename, content)
-    col_map = _find_column_map(headers)
-    parsed_rows, row_warnings = _parse_rows(data_rows, col_map)
+    parsed_rows, row_warnings, report = parse_workbook(filename, content)
 
     if not parsed_rows:
         raise CatalogParseError("No usable rows found in the uploaded sheet.")
 
     new_catalog, diff = build_catalog_from_rows(parsed_rows, active)
+    diff["sheet_report"] = report
 
     insert_resp = (
         client.table("catalog_versions")
@@ -465,14 +858,42 @@ def _activate_version(client, version_id: int) -> dict:
     return version
 
 
-def publish_version(version_id: int) -> dict:
-    """Make a pending version live: writes catalog_data.json and hot-reloads the running bot."""
+# A publish that deletes more than this many products is treated as an
+# accident until the owner says otherwise. Not a guess at a safe number —
+# a real upload of the shop's own workbook removed 208 products because the
+# parser read one sheet of six, and the only thing standing between that
+# and a live catalog was a diff screen where "removed: 208" looked like a
+# statistic. Routine edits remove nothing; a discontinued line removes a
+# handful. Anything larger deserves a sentence, not a click.
+MAX_SILENT_REMOVALS = 10
+
+
+def publish_version(version_id: int, confirm_removals: bool = False) -> dict:
+    """
+    Make a pending version live: writes catalog_data.json and hot-reloads
+    the running bot.
+
+    Refuses outright when the version would delete a large part of the
+    catalog, unless the caller confirms it. The confirmation exists so the
+    owner has to have read the number.
+    """
     client = require_client()
     version = _get_version(client, version_id)
     if version is None:
         raise CatalogParseError(f"Version {version_id} not found")
     if version["status"] != "pending":
         raise CatalogParseError(f"Version {version_id} is '{version['status']}', not pending — nothing to publish")
+
+    removed = version.get("removed_count") or 0
+    if removed > MAX_SILENT_REMOVALS and not confirm_removals:
+        raise CatalogRemovalWarning(
+            f"This would remove {removed} products from the live catalog. That is "
+            f"usually a sign the upload is missing a sheet rather than that the "
+            f"shop stopped selling {removed} perfumes — check the removed list "
+            f"before confirming.",
+            removed=removed,
+        )
+
     return _activate_version(client, version_id)
 
 

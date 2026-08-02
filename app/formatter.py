@@ -219,6 +219,22 @@ def _build_card_block(perfume: dict) -> list[str]:
     return lines
 
 
+def _text(key: str, fallback: str) -> str:
+    """The owner's wording for this message, or the shipped default.
+
+    Read per call rather than captured at import, so a change saved on the
+    dashboard applies to the next reply instead of the next redeploy. The
+    lookup is a dict read from memory (see app.messages) — Supabase is never
+    on a customer's critical path.
+    """
+    try:
+        from app import messages
+
+        return messages.get(key) or fallback
+    except Exception:
+        return fallback
+
+
 def build_price_card(
     perfume_id: str,
     opening: str | None = None,
@@ -251,7 +267,7 @@ def build_price_card(
     lines.append(SHIPPING_CARD)
 
     lines.append("")
-    lines.append(closing or WILL_CONTACT_LINE)
+    lines.append(closing or _text("closing_line", WILL_CONTACT_LINE))
 
     return "\n".join(lines)
 
@@ -287,7 +303,29 @@ def build_multi_price_card(
     if not perfumes:
         return AMBIGUOUS_MESSAGE
 
-    lines = []
+    remaining = len(perfume_ids) - len(shown)
+    return render_cards(perfumes, opening, closing, remaining=remaining)
+
+
+def render_cards(
+    perfumes: list[dict],
+    opening: str | None = None,
+    closing: str | None = None,
+    remaining: int = 0,
+) -> str:
+    """
+    Several perfume cards under one shipping card — the exact text the
+    customer receives.
+
+    Takes perfume DICTS rather than ids so a caller can hand it a filtered
+    view of one: the console's "copy card" lets the owner trim a card to the
+    sizes a customer actually asked about, and it has to produce the real
+    thing rather than a lookalike built somewhere else. Anything that
+    reformats a price card independently drifts from this one, and the first
+    anyone hears of it is a customer quoted in a format the shop does not
+    use.
+    """
+    lines: list[str] = []
     if opening:
         lines.append(opening)
         lines.append("")
@@ -299,12 +337,11 @@ def build_multi_price_card(
     lines.append("")
     lines.append(SHIPPING_CARD)
 
-    remaining = len(perfume_ids) - len(shown)
     if remaining > 0:
         lines.append("")
         lines.append(f"...and {remaining} more match your message - tell me the exact name for its price too!")
 
     lines.append("")
-    lines.append(closing or WILL_CONTACT_LINE)
+    lines.append(closing or _text("closing_line", WILL_CONTACT_LINE))
 
     return "\n".join(lines)

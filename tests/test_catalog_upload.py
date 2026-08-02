@@ -7,6 +7,8 @@ a configured client and are exercised manually against a real project, see
 SUPABASE_SETUP.md).
 """
 
+from unittest.mock import MagicMock, patch
+
 import pytest
 
 from app.catalog_upload import (
@@ -17,6 +19,9 @@ from app.catalog_upload import (
     _make_unique_id,
     _parse_rows,
     _read_rows,
+    CatalogRemovalWarning,
+    parse_workbook,
+    publish_version,
     _slugify,
     build_catalog_from_rows,
     generate_keywords,
@@ -300,3 +305,217 @@ class TestEndToEnd:
         assert diff["added_count"] == 2
         assert catalog["afnan9pm_rebel"]["prices"]["100ml_full"] == 2800
         assert "creed aventus absolu" in catalog["afnan9pm_rebel"]["keywords"]
+
+
+class TestAWorkbookIsReadWhole:
+    """
+    The bug this guards: the uploader read openpyxl's `wb.active` — one
+    sheet. For the shop's real six-tab export that is the men's/unisex
+    sheet, so uploading their own workbook and publishing it deleted the
+    208 products on the women's sheet from the live bot, dropped every
+    full-bottle price, and applied none of the men's-wins precedence. No
+    error was raised; the diff simply reported "removed: 208".
+    """
+
+    HEADER = ["Brand", "Fragrance Name", "Clone Of", "3ml", "5ml", "10ml"]
+
+    @staticmethod
+    def _book(sheets: dict) -> bytes:
+        import io as _io
+
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+        for title, rows in sheets.items():
+            ws = wb.create_sheet(title=title)
+            for row in rows:
+                ws.append(row)
+        buf = _io.BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+
+    def test_every_product_sheet_is_read_not_just_the_active_one(self):
+        content = self._book(
+            {
+                "Decant Sheet Men-UNISEX": [self.HEADER, ["Afnan", "9PM Rebel", "", 160, 220, 410]],
+                "For Women": [self.HEADER, ["Lattafa", "Yara", "", 130, 180, 300]],
+            }
+        )
+        rows, _warnings, report = parse_workbook("book.xlsx", content)
+        names = {f"{r.brand} {r.name}" for r in rows}
+        assert names == {"Afnan 9PM Rebel", "Lattafa Yara"}
+        assert [s["sheet"] for s in report["sheets_read"]] == [
+            "Decant Sheet Men-UNISEX",
+            "For Women",
+        ]
+
+    def test_the_mens_sheet_wins_a_price_disagreement(self):
+        """The shop's own rule — see tests/test_import_precedence.py, which
+        pins the same rule for the command-line importer. Both paths write
+        the same catalog and must not disagree about which row wins."""
+        content = self._book(
+            {
+                "For Women": [self.HEADER, ["Lattafa", "Khamrah", "", 190, 300, 370]],
+                "Decant Sheet Men-UNISEX": [self.HEADER, ["Lattafa", "Khamrah", "", 160, 230, 420]],
+            }
+        )
+        rows, warnings, report = parse_workbook("book.xlsx", content)
+        assert len(rows) == 1
+        assert rows[0].prices["3ml"] == 160
+        assert report["duplicate_rows_dropped"] == 1
+        assert any("Khamrah" in w for w in warnings)
+
+    def test_a_duplicate_is_reported_with_both_price_sets(self):
+        """Dropping a row silently is how the sheet's 39 price conflicts
+        stayed invisible for so long."""
+        content = self._book(
+            {
+                "Decant Sheet Men-UNISEX": [self.HEADER, ["Lattafa", "Khamrah", "", 160, 230, 420]],
+                "For Women": [self.HEADER, ["Lattafa", "Khamrah", "", 190, 300, 370]],
+            }
+        )
+        _rows, _warnings, report = parse_workbook("book.xlsx", content)
+        clash = report["duplicate_details"][0]
+        assert clash["kept_prices"]["3ml"] == 160
+        assert clash["dropped_prices"]["3ml"] == 190
+        assert clash["kept_from"] == "Decant Sheet Men-UNISEX"
+
+    def test_testers_are_never_read(self):
+        """Stock-on-hand for the owner. A tester price is not what a
+        customer pays and must never reach the catalog."""
+        content = self._book(
+            {
+                "Decant Sheet Men-UNISEX": [self.HEADER, ["Lattafa", "Khamrah", "", 160, 230, 420]],
+                "Testers ": [self.HEADER, ["Lattafa", "Tester Only", "", 1, 1, 1]],
+            }
+        )
+        rows, _warnings, _report = parse_workbook("book.xlsx", content)
+        assert {r.name for r in rows} == {"Khamrah"}
+
+    def test_a_sheet_with_no_product_table_is_skipped_not_fatal(self):
+        content = self._book(
+            {
+                "Decant Sheet Men-UNISEX": [self.HEADER, ["Lattafa", "Khamrah", "", 160, 230, 420]],
+                "Customer Reviews": [["Name", "Review"], ["Aditi", "lovely"]],
+            }
+        )
+        rows, _warnings, _report = parse_workbook("book.xlsx", content)
+        assert len(rows) == 1
+
+    def test_a_csv_is_still_one_table(self):
+        """Google Sheets exports one tab at a time, so a CSV has no other
+        sheets to look for and must keep working exactly as before."""
+        csv_text = "Brand,Fragrance Name,3ml\nLattafa,Khamrah,160\n"
+        rows, _warnings, report = parse_workbook("sheet.csv", csv_text.encode("utf-8"))
+        assert len(rows) == 1
+        assert report["sheets_read"] == [{"sheet": "", "rows": 1, "skipped": None}]
+
+
+class TestFullBottlePricesAreMergedNotGuessed:
+    """
+    The Retail Packs sheet is shaped differently — a Quantity and a Price
+    column rather than a column per size — and the uploader never read it at
+    all, so every full-bottle price was lost on upload.
+    """
+
+    @staticmethod
+    def _book_with_retail(decants: list, retail: list) -> bytes:
+        import io as _io
+
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+        ws = wb.create_sheet(title="Decant Sheet Men-UNISEX")
+        for row in [["Brand", "Fragrance Name", "Clone Of", "3ml", "5ml"], *decants]:
+            ws.append(row)
+        rs = wb.create_sheet(title="Retail Packs ")
+        for row in [["Brand Name", "Perfume Name", "Quantity (ml)", "Price"], *retail]:
+            rs.append(row)
+        buf = _io.BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+
+    def test_a_full_bottle_price_lands_on_its_decant_product(self):
+        content = self._book_with_retail(
+            [["Afnan", "9PM Rebel", "", 160, 220]],
+            [["AFNAN", "9PM REBEL EDP", 100, 2850]],
+        )
+        rows, _warnings, report = parse_workbook("book.xlsx", content)
+        assert len(rows) == 1
+        assert rows[0].prices["100ml_full"] == 2850
+        assert report["full_bottle_prices_attached"] == 1
+
+    def test_an_abbreviated_brand_still_matches(self):
+        """The retail sheet writes "AHMED" where the decant sheet writes
+        "Ahmed Al Maghribi". Comparing whole strings scored those far too
+        low to match, so 300+ full-bottle prices went unattached."""
+        content = self._book_with_retail(
+            [["Ahmed Al Maghribi", "Aqua Oud", "", 170, 230]],
+            [["AHMED", "AQUA OUD", 100, 2400]],
+        )
+        rows, _warnings, _report = parse_workbook("book.xlsx", content)
+        assert rows[0].prices["100ml_full"] == 2400
+
+    def test_a_row_matching_nothing_is_reported_never_invented(self):
+        """Creating a product from an unmatched retail row would quietly
+        double a large part of the catalog — most of them are the same
+        perfume written differently, not new stock. So it comes back as
+        something for the owner to decide on."""
+        content = self._book_with_retail(
+            [["Afnan", "9PM Rebel", "", 160, 220]],
+            [["NASEEM", "AURORA", 100, 1450]],
+        )
+        rows, _warnings, report = parse_workbook("book.xlsx", content)
+        assert {r.name for r in rows} == {"9PM Rebel"}
+        assert report["full_bottle_unmatched"] == 1
+        orphan = report["full_bottle_unmatched_details"][0]
+        assert orphan["display_name"] == "Naseem Aurora"
+        assert orphan["prices"] == {"100ml_full": 1450}
+
+    def test_a_blank_quantity_still_produces_a_sellable_price(self):
+        content = self._book_with_retail(
+            [["Afnan", "9PM Rebel", "", 160, 220]],
+            [["NASEEM", "AURORA", None, 1450]],
+        )
+        _rows, _warnings, report = parse_workbook("book.xlsx", content)
+        assert report["full_bottle_unmatched_details"][0]["prices"] == {"ml_full": 1450}
+
+
+class TestAPublishThatDeletesTheCatalogIsRefused:
+    """
+    The last line of defence. A parser bug that drops a sheet shows up as a
+    large "removed" count, and on the old diff screen that read as a
+    statistic rather than a warning — one click from deleting 208 live
+    products. See catalog_upload.MAX_SILENT_REMOVALS.
+    """
+
+    def _version(self, removed: int) -> dict:
+        return {"id": 7, "status": "pending", "removed_count": removed, "storage_path": "v7.json"}
+
+    def test_a_large_removal_is_refused_until_confirmed(self):
+        with patch("app.catalog_upload.require_client", return_value=MagicMock()):
+            with patch("app.catalog_upload._get_version", return_value=self._version(208)):
+                with patch("app.catalog_upload._activate_version") as activate:
+                    with pytest.raises(CatalogRemovalWarning) as excinfo:
+                        publish_version(7)
+        activate.assert_not_called()
+        assert excinfo.value.removed == 208
+        assert "208" in str(excinfo.value)
+
+    def test_confirming_lets_it_through(self):
+        """The owner is allowed to discontinue a whole line — they just have
+        to have read the number first."""
+        with patch("app.catalog_upload.require_client", return_value=MagicMock()):
+            with patch("app.catalog_upload._get_version", return_value=self._version(208)):
+                with patch("app.catalog_upload._activate_version", return_value={"ok": True}) as activate:
+                    publish_version(7, confirm_removals=True)
+        activate.assert_called_once()
+
+    def test_an_ordinary_publish_needs_no_confirmation(self):
+        with patch("app.catalog_upload.require_client", return_value=MagicMock()):
+            with patch("app.catalog_upload._get_version", return_value=self._version(2)):
+                with patch("app.catalog_upload._activate_version", return_value={"ok": True}) as activate:
+                    publish_version(7)
+        activate.assert_called_once()

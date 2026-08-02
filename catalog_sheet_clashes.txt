@@ -162,7 +162,7 @@ Pendora Scents Enchantment Blue Intense
     ignored (For Women): 5ml 130  8ml 190  10ml 240
 
 Rasasi Hawas Pink
-    kept   : 3ml 150  5ml 210  8ml 300  10ml 380  20ml 760  30ml 1000
+    kept   : 3ml 150  5ml 210  8ml 300  10ml 380  20ml 760  30ml 1000  ml_full 3100
     ignored (For Women): 5ml 210  8ml 300  10ml 380
 
 Rasasi Hawas Diva
