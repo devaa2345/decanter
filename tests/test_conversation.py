@@ -39,6 +39,26 @@ def clean_state():
     clear()
 
 
+@pytest.fixture(autouse=True)
+def no_supabase():
+    """
+    Pin the Supabase boundary shut for every test that does not explicitly
+    open it.
+
+    recent_turns() warms itself from message_events when a client exists, so
+    with real credentials in the local .env these tests were reading a live
+    production conversation and asserting against it — "cleared, so this is
+    empty" failed because the database still had the customer's history.
+    Same reasoning as tests/test_auth.py: a test must not depend on, or
+    leak into, whatever happens to be configured on this machine.
+
+    The four tests that DO exercise the warm-start patch get_client
+    themselves, and their patch wins over this one.
+    """
+    with patch("app.conversation.get_client", return_value=None):
+        yield
+
+
 class TestRecording:
     def test_customer_message_is_remembered(self):
         record_customer_message(SENDER, "9pm rebel price")

@@ -492,3 +492,24 @@ dialog footer { padding: 0.75rem 1.1rem; border-top: 1px solid var(--rule); disp
 
 .switch { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; cursor: pointer; }
 .switch input { width: auto; }
+
+/* The bot's replies carry a copy button — testing a message here is usually
+   how the owner gets a card to paste into a real chat, and re-selecting text
+   out of a scrolling thread by hand loses a line as often as not. */
+.bubble-foot {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.35rem;
+  padding-top: 0.3rem;
+  border-top: 1px solid var(--rule);
+}
+.bubble-foot .meta { margin-top: 0; flex: 1; min-width: 0; }
+.copy-reply {
+  flex: 0 0 auto;
+  padding: 0.1rem 0.4rem;
+  font-size: 0.7rem;
+  opacity: 0.55;
+}
+.bubble:hover .copy-reply,
+.copy-reply:focus-visible { opacity: 1; }

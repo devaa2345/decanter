@@ -934,6 +934,28 @@ VIEWS.messages = async (root) => {
 
 /* --- Chat tester ---------------------------------------------------------- */
 
+async function copyReply(text, button) {
+  // Clipboard permission can be refused, and a "Copy" button that silently
+  // does nothing is worse than no button. The fallback selects the text so
+  // Ctrl+C always works, and either way the button says what happened
+  // rather than leaving you to guess whether it took.
+  const label = button.textContent;
+  try {
+    await navigator.clipboard.writeText(text);
+    button.textContent = "✓ Copied";
+    toast("Reply copied — paste it straight into the chat.", "ok", 2200);
+  } catch {
+    const range = document.createRange();
+    range.selectNodeContents(button.closest(".bubble"));
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    button.textContent = "press Ctrl+C";
+    toast("Selected the reply — press Ctrl+C to copy.", "warn", 5000);
+  }
+  setTimeout(() => { button.textContent = label; }, 2200);
+}
+
 VIEWS.tester = async (root) => {
   root.replaceChildren();
   const thread = el("div", { className: "thread" });
@@ -949,9 +971,32 @@ VIEWS.tester = async (root) => {
   function draw() {
     thread.replaceChildren();
     for (const turn of state.thread) {
-      if (turn.role === "out") thread.append(el("div", { className: "bubble out" }, turn.text));
-      else if (turn.text) thread.append(el("div", { className: "bubble in" }, turn.text, el("span", { className: "meta" }, turn.meta || "")));
-      else thread.append(el("div", { className: "bubble silent" }, "the bot stayed silent — " + (turn.meta || "no product named")));
+      if (turn.role === "out") {
+        thread.append(el("div", { className: "bubble out" }, turn.text));
+      } else if (turn.text) {
+        // The reply carries its own copy button: the whole point of testing
+        // a message here is often to get the card, and re-selecting text out
+        // of a scrolling thread by hand loses a line as often as not.
+        thread.append(
+          el(
+            "div",
+            { className: "bubble in" },
+            turn.text,
+            el(
+              "div",
+              { className: "bubble-foot" },
+              el("span", { className: "meta" }, turn.meta || ""),
+              el(
+                "button",
+                { className: "btn sm ghost copy-reply", title: "Copy this reply", onclick: (e) => copyReply(turn.text, e.currentTarget) },
+                "⧉ Copy"
+              )
+            )
+          )
+        );
+      } else {
+        thread.append(el("div", { className: "bubble silent" }, "the bot stayed silent — " + (turn.meta || "no product named")));
+      }
     }
     thread.scrollTop = thread.scrollHeight;
   }

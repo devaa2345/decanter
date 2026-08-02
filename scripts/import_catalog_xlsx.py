@@ -229,7 +229,8 @@ def merge_retail_packs(wb, rows: dict[str, ParsedRow], notes: list[str]) -> None
 
     keys = {_match_key(r.brand + " " + r.name): k for k, r in rows.items()}
     candidates = list(keys)
-    attached = created = 0
+    attached = 0
+    unmatched: list[str] = []
 
     for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
         def cell(key: str) -> str:
@@ -257,22 +258,24 @@ def merge_retail_packs(wb, rows: dict[str, ParsedRow], notes: list[str]) -> None
             attached += 1
             continue
 
-        # Nothing to attach it to — so this row IS the product.
-        display = _retail_display_name(brand, name)
-        key = normalize_message(display)
-        if key in rows:
-            rows[key].prices.setdefault(size_key, price)
-            continue
-        rows[key] = ParsedRow(
-            brand=brand.title(), name=name.title(), clone_of=None, prices={size_key: price}
-        )
-        keys[probe] = key
-        candidates.append(probe)
-        created += 1
+        # Nothing to attach it to — reported, never invented.
+        #
+        # Creating a product from every unmatched retail row was tried and
+        # withdrawn: ~370 of these match no decant product, and most are the
+        # same perfume written differently ("AHMED BIN SHAIKH" for "Ahmed Al
+        # Maghribi Bin Sheikh"), not new stock. Creating them quietly
+        # doubled a large slice of the catalog and hung real prices on the
+        # wrong bottles. Only ~43 are genuinely unreachable, and which 43 is
+        # a judgement about stock rather than a fuzzy ratio — so the console
+        # lists them for the owner to add deliberately (see
+        # app.catalog_upload.merge_retail_packs, which this must agree with:
+        # the two paths write the same catalog).
+        unmatched.append(_retail_display_name(brand, name))
 
     notes.append(
         f"{RETAIL_SHEET.strip()}: {attached} full-bottle prices attached to a decant "
-        f"product, {created} added as full-bottle-only products"
+        f"product, {len(unmatched)} rows matched nothing (add them from the console if "
+        f"they are separate products)"
     )
 
 
