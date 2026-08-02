@@ -24,6 +24,12 @@ from app.db import SupabaseUnavailable, get_client, require_client
 
 logger = logging.getLogger(__name__)
 
+# The layer every welcome reply is logged under. Named here rather than
+# spelled out at each use because has_been_welcomed queries for it and
+# app.main writes it — if those two ever disagreed, the welcome would go out
+# on every greeting forever.
+WELCOME_LAYER = "welcome_first_contact"
+
 
 # --- Write side -----------------------------------------------------------
 
@@ -31,39 +37,44 @@ def _insert_message_event(client, record: dict) -> None:
     client.table("message_events").insert(record).execute()
 
 
-def _fetch_one_by_sender(client, sender: str) -> list[dict]:
+def _fetch_welcome_by_sender(client, sender: str) -> list[dict]:
     resp = (
         client.table("message_events")
         .select("id")
         .eq("sender", sender)
+        .eq("layer", WELCOME_LAYER)
         .limit(1)
         .execute()
     )
     return resp.data or []
 
 
-async def is_first_contact(sender: str) -> bool:
+async def has_been_welcomed(sender: str) -> bool:
     """
-    True if this sender has no prior message_events row - i.e. this is the
-    very first message the bot has ever received from them (see
-    app.formatter.WELCOME_MESSAGE / app.main.webhook_handler's first-contact
-    branch). Called before the current message is logged, so an empty
-    result genuinely means "never seen before".
+    True if this sender has already been sent the long welcome — i.e. some
+    earlier message of theirs was logged under WELCOME_LAYER (see
+    app.main's welcome branch, which writes exactly that).
 
-    Best-effort like log_message_event: if Supabase isn't configured (or the
-    query fails), there's no way to know, so this returns False rather than
-    risk re-sending the welcome to a returning customer forever.
+    Read from the event log rather than tracked separately because the log
+    is already the durable record of what the bot said, and a redeploy or a
+    restart must not hand a returning customer the whole shop introduction
+    a second time.
+
+    When Supabase cannot answer, this returns True — the cautious direction
+    on purpose. Not knowing means not sending a wall of text: a customer who
+    never gets the welcome is mildly underserved, one who gets the whole
+    shop introduction on every "hi" is being spammed.
     """
     client = get_client()
     if client is None:
-        return False
+        return True
 
     try:
-        rows = await asyncio.to_thread(_fetch_one_by_sender, client, sender)
-        return not rows
+        rows = await asyncio.to_thread(_fetch_welcome_by_sender, client, sender)
+        return bool(rows)
     except Exception:
-        logger.exception("Failed to check first-contact status in Supabase")
-        return False
+        logger.exception("Failed to check welcome status in Supabase")
+        return True
 
 
 async def log_message_event(

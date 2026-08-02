@@ -27,6 +27,15 @@ _GREETING_PHRASES = (
     "good morning", "good afternoon", "good evening", "good day",
 )
 
+# Words that can sit beside a greeting without making it about anything.
+# "hello bhai", "hi sir", "hey there good morning" are all still just
+# someone saying hello — see is_greeting.
+_GREETING_FILLER = {
+    "there", "bro", "bhai", "sir", "madam", "maam", "ma", "am", "boss",
+    "ji", "dear", "everyone", "all", "again", "good", "morning",
+    "afternoon", "evening", "day", "night", "a", "the",
+}
+
 _CATALOG_PHRASES = (
     "catalog", "catalogue", "price list", "pricelist", "rate list",
     "ratelist", "full list", "send catalog", "send list",
@@ -62,6 +71,47 @@ def is_catalog_request(text: str) -> bool:
         return False
 
     return any(phrase in normalized for phrase in _CATALOG_PHRASES)
+
+
+def is_greeting(text: str) -> bool:
+    """
+    True if the message is a greeting and NOTHING ELSE — "hi", "hello bhai",
+    "hey there", "good morning". This is what the long first-time welcome is
+    gated on (see app.main's welcome branch), and the "nothing else" part is
+    the whole point: someone who opens with "hi khamrah price" asked for a
+    price, and answering a price question with a wall of shop information is
+    not a welcome, it is a non-answer.
+
+    Deliberately stricter than is_greeting_or_catalog_request below, which
+    only looks at the first word because by the time it runs the matcher has
+    already failed and the rest of the sentence is known to name nothing.
+    """
+    if not text:
+        return False
+
+    normalized = normalize_message(text)
+    if not normalized:
+        return False
+
+    for phrase in _GREETING_PHRASES:
+        normalized = normalized.replace(phrase, " ")
+
+    leftover = [
+        word
+        for word in normalized.split()
+        if word not in _GREETING_WORDS and word not in _GREETING_FILLER
+    ]
+    if leftover:
+        return False
+
+    # Every word was greeting or filler — but "bro" on its own is filler,
+    # not a greeting, so at least one real greeting word has to have been
+    # there. Checked against the ORIGINAL text, since the phrase stripping
+    # above has already removed "good morning" from `normalized`.
+    original = normalize_message(text)
+    return any(word in _GREETING_WORDS for word in original.split()) or any(
+        phrase in original for phrase in _GREETING_PHRASES
+    )
 
 
 def is_greeting_or_catalog_request(text: str) -> bool:

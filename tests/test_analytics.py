@@ -477,35 +477,45 @@ class TestLogMessageEvent:
                 asyncio.run(analytics.log_message_event(**self.BASE_KWARGS))  # must not raise
 
 
-class TestIsFirstContact:
+class TestHasBeenWelcomed:
     """
-    Powers the WELCOME_MESSAGE first-contact branch (see app.main's Step 3b)
-    - True means this sender has no prior message_events row at all.
+    Gates the long welcome (see app.main's Step 3b) — True means this sender
+    has already been sent it, recorded as a message_events row under
+    WELCOME_LAYER.
     """
 
-    def test_no_prior_rows_is_first_contact(self):
+    def test_no_welcome_row_means_not_yet_welcomed(self):
         with patch("app.analytics.get_client", return_value=MagicMock()):
-            with patch("app.analytics._fetch_one_by_sender", return_value=[]):
-                result = asyncio.run(analytics.is_first_contact("919876543210"))
+            with patch("app.analytics._fetch_welcome_by_sender", return_value=[]):
+                result = asyncio.run(analytics.has_been_welcomed("919876543210"))
+        assert result is False
+
+    def test_a_welcome_row_means_already_welcomed(self):
+        with patch("app.analytics.get_client", return_value=MagicMock()):
+            with patch("app.analytics._fetch_welcome_by_sender", return_value=[{"id": 1}]):
+                result = asyncio.run(analytics.has_been_welcomed("919876543210"))
         assert result is True
 
-    def test_a_prior_row_means_not_first_contact(self):
-        with patch("app.analytics.get_client", return_value=MagicMock()):
-            with patch("app.analytics._fetch_one_by_sender", return_value=[{"id": 1}]):
-                result = asyncio.run(analytics.is_first_contact("919876543210"))
-        assert result is False
-
-    def test_supabase_unconfigured_defaults_to_not_first_contact(self):
-        """Can't tell either way with Supabase unconfigured — defaults to
-        False rather than risk re-sending the welcome forever."""
+    def test_supabase_unconfigured_assumes_already_welcomed(self):
+        """Can't tell either way — assumes yes, so an unconfigured or broken
+        Supabase means a customer misses the introduction rather than
+        getting the whole thing again on every "hi"."""
         with patch("app.analytics.get_client", return_value=None):
-            result = asyncio.run(analytics.is_first_contact("919876543210"))
-        assert result is False
+            result = asyncio.run(analytics.has_been_welcomed("919876543210"))
+        assert result is True
 
-    def test_query_exception_defaults_to_not_first_contact(self):
+    def test_query_exception_assumes_already_welcomed(self):
         with patch("app.analytics.get_client", return_value=MagicMock()):
             with patch(
-                "app.analytics._fetch_one_by_sender", side_effect=RuntimeError("db down")
+                "app.analytics._fetch_welcome_by_sender", side_effect=RuntimeError("db down")
             ):
-                result = asyncio.run(analytics.is_first_contact("919876543210"))  # must not raise
-        assert result is False
+                result = asyncio.run(analytics.has_been_welcomed("919876543210"))  # must not raise
+        assert result is True
+
+    def test_it_reads_back_exactly_the_layer_main_writes(self):
+        """The two halves have to agree or the welcome goes out forever."""
+        client = MagicMock()
+        with patch("app.analytics.get_client", return_value=client):
+            asyncio.run(analytics.has_been_welcomed("919876543210"))
+        eq_calls = client.table.return_value.select.return_value.eq
+        assert eq_calls.return_value.eq.call_args[0] == ("layer", analytics.WELCOME_LAYER)

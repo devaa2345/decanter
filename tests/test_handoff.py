@@ -199,3 +199,121 @@ class TestAdminPauseDurationHours:
         _, key, value = upsert_mock.call_args[0]
         assert key == "human_handoff_pause_hours"
         assert value == 48
+
+
+class TestThePauseHoldsWithoutSupabase:
+    """
+    Reported from production: the owner took over a conversation and the bot
+    carried on answering as soon as the customer named a perfume.
+
+    The cause was that the pause lived only in Supabase and every write path
+    swallowed its exception, so an unconfigured URL, a missing migration or
+    an RLS rule blocking the key all produced a pause that was never stored
+    — and nothing in the logs said so. The pause now takes effect in memory
+    first, which is what makes it hold regardless.
+    """
+
+    def test_pause_holds_when_supabase_is_unconfigured(self):
+        async def _fake_get_hours():
+            return 24.0
+
+        with patch("app.handoff.get_client", return_value=None):
+            with patch("app.handoff.get_pause_duration_hours", side_effect=_fake_get_hours):
+                persisted = asyncio.run(handoff.start_pause("919876543210"))
+                assert asyncio.run(handoff.is_paused("919876543210")) is True
+        assert persisted is False
+
+    def test_pause_holds_when_the_write_fails(self):
+        async def _fake_get_hours():
+            return 24.0
+
+        with patch("app.handoff.get_client", return_value=MagicMock()):
+            with patch("app.handoff.get_pause_duration_hours", side_effect=_fake_get_hours):
+                with patch("app.handoff._upsert_pause_row", side_effect=RuntimeError("db down")):
+                    persisted = asyncio.run(handoff.start_pause("919876543210"))
+                assert asyncio.run(handoff.is_paused("919876543210")) is True
+        assert persisted is False
+
+    def test_a_successful_write_says_so(self):
+        async def _fake_get_hours():
+            return 24.0
+
+        with patch("app.handoff.get_client", return_value=MagicMock()):
+            with patch("app.handoff.get_pause_duration_hours", side_effect=_fake_get_hours):
+                with patch("app.handoff._upsert_pause_row"):
+                    assert asyncio.run(handoff.start_pause("919876543210")) is True
+
+    def test_an_expired_memory_pause_stops_holding(self):
+        async def _fake_get_hours():
+            return -1.0  # already elapsed
+
+        with patch("app.handoff.get_client", return_value=None):
+            with patch("app.handoff.get_pause_duration_hours", side_effect=_fake_get_hours):
+                asyncio.run(handoff.start_pause("919876543210"))
+                assert asyncio.run(handoff.is_paused("919876543210")) is False
+
+    def test_a_pause_for_one_customer_does_not_silence_another(self):
+        async def _fake_get_hours():
+            return 24.0
+
+        with patch("app.handoff.get_client", return_value=None):
+            with patch("app.handoff.get_pause_duration_hours", side_effect=_fake_get_hours):
+                asyncio.run(handoff.start_pause("919876543210"))
+                assert asyncio.run(handoff.is_paused("919000000001")) is False
+
+
+class TestPhoneNumberFormatting:
+    """
+    The second half of the same production failure. An inbound
+    message.received carries the customer in `from` and an outbound
+    message.sent carries them in `to`, and nothing guarantees the two are
+    punctuated the same way. Keyed on the raw strings, a pause written for
+    "+919876543210" was invisible to a lookup for "919876543210" — and the
+    bot's own reply echoing back under the other spelling would have been
+    read as the owner taking over.
+    """
+
+    @pytest.mark.parametrize(
+        "written,read",
+        [
+            ("+919876543210", "919876543210"),
+            ("919876543210", "+91 98765 43210"),
+            ("919876543210@c.us", "919876543210"),
+            ("91-98765-43210", "919876543210"),
+        ],
+    )
+    def test_a_pause_is_found_however_the_number_is_written(self, written, read):
+        async def _fake_get_hours():
+            return 24.0
+
+        with patch("app.handoff.get_client", return_value=None):
+            with patch("app.handoff.get_pause_duration_hours", side_effect=_fake_get_hours):
+                asyncio.run(handoff.start_pause(written))
+                assert asyncio.run(handoff.is_paused(read)) is True
+
+    def test_the_bots_own_echo_is_recognised_however_the_number_is_written(self):
+        handoff.record_own_send("919876543210", "Here are the prices")
+        assert handoff.was_sent_by_bot("+919876543210", "Here are the prices") is True
+
+    def test_trailing_whitespace_does_not_break_echo_detection(self):
+        """An echo that failed to match would be read as the owner taking
+        over — pausing the bot on its own reply."""
+        handoff.record_own_send("919876543210", "Here are the prices")
+        assert handoff.was_sent_by_bot("919876543210", "Here are the prices\n") is True
+
+    def test_a_genuinely_different_message_is_still_not_an_echo(self):
+        handoff.record_own_send("919876543210", "Here are the prices")
+        assert handoff.was_sent_by_bot("919876543210", "sending it today bhai") is False
+
+    def test_the_supabase_row_is_keyed_on_the_normalised_number(self):
+        """Otherwise a restart would look the pause up under a key the write
+        never used."""
+        async def _fake_get_hours():
+            return 24.0
+
+        with patch("app.handoff.get_client", return_value=MagicMock()):
+            with patch("app.handoff.get_pause_duration_hours", side_effect=_fake_get_hours):
+                with patch("app.handoff._upsert_pause_row") as upsert_mock:
+                    asyncio.run(handoff.start_pause("+91 98765 43210"))
+        _client, sender, _until = upsert_mock.call_args[0]
+        assert sender == "919876543210"

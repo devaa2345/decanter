@@ -61,19 +61,18 @@ def no_webhook_secret():
 
 
 @pytest.fixture(autouse=True)
-def not_first_contact():
+def already_welcomed():
     """
-    Force is_first_contact() to False for every test in this file except
-    TestFirstContactWelcome (which explicitly re-patches it per case).
+    Force has_been_welcomed() to True for every test in this file except
+    TestFirstGreetingWelcome (which explicitly re-patches it per case), so
+    no test here has to think about the welcome unless it is about the
+    welcome.
 
-    Without this, every test here would either silently depend on whatever
-    real Supabase state the local .env points at (nondeterministic, and
-    would write welcome-message test noise into production analytics), or —
-    with Supabase unconfigured — happen to pass anyway since
-    is_first_contact already defaults to False. Pinning it explicitly makes
-    that guarantee independent of local .env/Supabase configuration.
+    Without this, every test would silently depend on whatever real
+    Supabase state the local .env points at — nondeterministic, and it
+    would write welcome-message test noise into production analytics.
     """
-    with patch("app.main.is_first_contact", new_callable=AsyncMock, return_value=False):
+    with patch("app.main.has_been_welcomed", new_callable=AsyncMock, return_value=True):
         yield
 
 
@@ -215,7 +214,15 @@ class TestHealthCheck:
     def test_health_returns_200(self, client):
         response = client.get("/health")
         assert response.status_code == 200
-        assert response.json() == {"status": "ok"}
+        assert response.json()["status"] == "ok"
+
+    def test_health_reports_whether_the_handoff_pause_is_durable(self, client):
+        """The pause failing is invisible from the outside — a bot that never
+        stops talking looks exactly like a bot nobody has taken a
+        conversation away from. This makes the answer a URL."""
+        body = client.get("/health").json()
+        assert "handoff_pause" in body
+        assert set(body["handoff_pause"]) == {"durable", "detail"}
 
 
 class TestWebhookHandler:
@@ -479,73 +486,108 @@ class TestWebhookHandler:
         assert "₹" in reply_text
 
 
-class TestFirstContactWelcome:
+class TestFirstGreetingWelcome:
     """
-    The very first message ever received from a sender gets WELCOME_MESSAGE
-    regardless of content; any later message from that same sender goes
-    through the normal pipeline unaffected — see app.formatter.WELCOME_MESSAGE
-    and app.main.webhook_handler's Step 3b.
+    The long welcome — catalog link, shipping terms, the shop's whole pitch
+    — is sent on a customer's FIRST bare hello and never again.
+
+    It used to go out on the first message a sender ever sent, whatever it
+    said, so someone opening with "khamrah price" got a wall of shop
+    information instead of the price they asked for. Now it is gated on the
+    message being a greeting AND nothing else, and on the customer not
+    having had it already. See app.main's Step 3b and app.greeting.is_greeting.
     """
 
     @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
-    @patch("app.main.is_first_contact", new_callable=AsyncMock, return_value=True)
-    def test_first_ever_message_gets_welcome_regardless_of_content(self, mock_first, mock_send, client):
-        payload = _make_webhook_payload("sauvage")
-        response = client.post("/webhook", json=payload)
+    @patch("app.main.has_been_welcomed", new_callable=AsyncMock, return_value=False)
+    @pytest.mark.parametrize("greeting", ["hi", "Hello!", "hey there", "good morning", "namaste"])
+    def test_a_first_bare_greeting_gets_the_welcome(
+        self, mock_welcomed, mock_send, client, greeting
+    ):
+        response = client.post("/webhook", json=_make_webhook_payload(greeting))
         assert response.status_code == 200
-        mock_send.assert_called_once()
         assert mock_send.call_args[0][1] == WELCOME_MESSAGE
 
     @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
-    @patch("app.main.is_first_contact", new_callable=AsyncMock, return_value=True)
-    def test_first_contact_short_circuits_before_the_matcher(self, mock_first, mock_send, client):
-        """Even a message that would otherwise match a real perfume must
-        still get the welcome, not a price card, on true first contact."""
+    @patch("app.main.has_been_welcomed", new_callable=AsyncMock, return_value=False)
+    def test_a_first_message_naming_a_perfume_gets_the_price_not_the_welcome(
+        self, mock_welcomed, mock_send, client
+    ):
+        """The whole point of the change: answer what they asked."""
+        with patch(
+            "app.groq_client.classify_and_phrase",
+            new_callable=AsyncMock,
+            return_value=GroqClassification(),
+        ):
+            response = client.post("/webhook", json=_make_webhook_payload("sauvage price"))
+        assert response.status_code == 200
+        reply = mock_send.call_args[0][1]
+        assert reply != WELCOME_MESSAGE
+        assert "SAUVAGE" in reply.upper()
+
+    @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
+    @patch("app.main.has_been_welcomed", new_callable=AsyncMock, return_value=False)
+    def test_a_greeting_that_also_names_a_perfume_gets_the_price(
+        self, mock_welcomed, mock_send, client
+    ):
+        """"hi khamrah price" is a price question with a polite opener, not
+        a hello. Answering it with the introduction would be a non-answer."""
+        with patch(
+            "app.groq_client.classify_and_phrase",
+            new_callable=AsyncMock,
+            return_value=GroqClassification(),
+        ):
+            response = client.post("/webhook", json=_make_webhook_payload("hi khamrah price"))
+        assert response.status_code == 200
+        reply = mock_send.call_args[0][1]
+        assert reply != WELCOME_MESSAGE
+        assert "KHAMRAH" in reply.upper()
+
+    @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
+    @patch("app.main.has_been_welcomed", new_callable=AsyncMock, return_value=False)
+    def test_the_welcome_short_circuits_before_the_matcher(
+        self, mock_welcomed, mock_send, client
+    ):
         with patch("app.main.match_perfume", new_callable=AsyncMock) as mock_match:
-            payload = _make_webhook_payload("sauvage")
-            response = client.post("/webhook", json=payload)
+            response = client.post("/webhook", json=_make_webhook_payload("hello"))
         assert response.status_code == 200
         mock_match.assert_not_called()
         assert mock_send.call_args[0][1] == WELCOME_MESSAGE
 
     @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
-    @patch("app.main.is_first_contact", new_callable=AsyncMock, return_value=True)
-    def test_first_contact_welcome_even_for_non_text_and_empty_messages(self, mock_first, mock_send, client):
-        """Regardless of content" includes an image or an empty message —
-        first contact always gets the welcome, never NON_TEXT_MESSAGE or
-        silence."""
-        payload = _make_webhook_payload("", message_type="image", message_id="first_contact_image")
-        response = client.post("/webhook", json=payload)
-        assert response.status_code == 200
-        assert mock_send.call_args[0][1] == WELCOME_MESSAGE
-
-    @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
-    def test_repeat_greeting_from_known_sender_gets_old_fallback_not_welcome(self, mock_send, client):
-        """A sender who is NOT first contact (the default in this file, via
-        the not_first_contact autouse fixture) still gets the existing
-        catalog fallback on a bare greeting — the behavior this feature must
-        leave completely unchanged."""
-        payload = _make_webhook_payload("hi")
-        response = client.post("/webhook", json=payload)
+    def test_a_later_greeting_gets_the_short_catalog_reply(self, mock_send, client):
+        """Once welcomed (the default in this file, via the already_welcomed
+        autouse fixture), every later "hi" gets the short FALLBACK_MESSAGE —
+        the same catalog link without the introduction they have read."""
+        response = client.post("/webhook", json=_make_webhook_payload("hi"))
         assert response.status_code == 200
         reply_text = mock_send.call_args[0][1]
         assert reply_text == FALLBACK_MESSAGE
         assert reply_text != WELCOME_MESSAGE
 
     @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
-    @patch("app.main.is_first_contact", new_callable=AsyncMock, return_value=True)
-    def test_welcome_is_logged_with_its_own_layer(self, mock_first, mock_send, client):
+    def test_a_non_text_first_message_no_longer_gets_the_welcome(self, mock_send, client):
+        """An image is not a greeting. It gets the ordinary non-text reply."""
+        payload = _make_webhook_payload("", message_type="image", message_id="welcome_image")
+        response = client.post("/webhook", json=payload)
+        assert response.status_code == 200
+        assert mock_send.call_args[0][1] != WELCOME_MESSAGE
+
+    @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
+    @patch("app.main.has_been_welcomed", new_callable=AsyncMock, return_value=False)
+    def test_welcome_is_logged_with_its_own_layer(self, mock_welcomed, mock_send, client):
+        """The layer is what has_been_welcomed reads back, so it is what
+        stops the welcome going out a second time."""
         with patch("app.main.log_message_event", new_callable=AsyncMock) as mock_log:
-            payload = _make_webhook_payload("hello")
-            response = client.post("/webhook", json=payload)
+            response = client.post("/webhook", json=_make_webhook_payload("hello"))
         assert response.status_code == 200
         mock_log.assert_called_once()
         assert mock_log.call_args.kwargs["layer"] == "welcome_first_contact"
         assert mock_log.call_args.kwargs["reply_sent"] is True
 
     @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
-    @patch("app.main.is_first_contact", new_callable=AsyncMock, return_value=True)
-    def test_first_contact_still_deduped_on_retry(self, mock_first, mock_send, client):
+    @patch("app.main.has_been_welcomed", new_callable=AsyncMock, return_value=False)
+    def test_welcome_is_still_deduped_on_retry(self, mock_welcomed, mock_send, client):
         payload = _make_webhook_payload("hi", message_id="welcome_dup_1")
         client.post("/webhook", json=payload)
         client.post("/webhook", json=payload)
@@ -899,3 +941,217 @@ class TestUnstockedPerfumeReply:
 
         assert mock_log.call_args.kwargs["layer"] == "unstocked_perfume"
         assert mock_log.call_args.kwargs["perfume_id"] is None
+
+
+class TestTheOwnerTakingOverActuallySilencesTheBot:
+    """
+    Reported from production: the owner stepped into a conversation and the
+    bot answered the customer's next message anyway, as soon as it saw a
+    perfume name in it.
+
+    Everything below runs the REAL app.handoff — start_pause and is_paused
+    are not mocked here, unlike TestHumanHandoff above, which is exactly why
+    the bug survived that class. Supabase is unconfigured throughout, which
+    is the condition the pause used to silently do nothing under.
+    """
+
+    OWNER_MESSAGE = "Hi! I saw your order, sending the payment link now."
+
+    @pytest.fixture(autouse=True)
+    def real_handoff(self):
+        """Undo the not_paused autouse fixture and the Supabase client, so
+        this exercises the actual pause logic with nothing to persist to."""
+        with patch("app.main.is_paused", handoff.is_paused):
+            with patch("app.handoff.get_client", return_value=None):
+                yield
+
+    def _owner_takes_over(self, client, customer):
+        response = client.post(
+            "/webhook", json=_make_message_sent_payload(customer, self.OWNER_MESSAGE)
+        )
+        assert response.status_code == 200
+
+    @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
+    def test_the_bot_stays_silent_on_the_next_perfume_the_customer_names(
+        self, mock_send, client
+    ):
+        customer = "919444000001"
+        self._owner_takes_over(client, customer)
+
+        response = client.post(
+            "/webhook",
+            json=_make_webhook_payload("khamrah price", sender=customer, message_id="ho_1"),
+        )
+        assert response.status_code == 200
+        mock_send.assert_not_called()
+
+    @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
+    def test_it_stays_silent_on_a_greeting_too(self, mock_send, client):
+        """The pause is checked before the welcome branch, so not even a
+        first hello gets through."""
+        customer = "919444000002"
+        self._owner_takes_over(client, customer)
+
+        response = client.post(
+            "/webhook", json=_make_webhook_payload("hi", sender=customer, message_id="ho_2")
+        )
+        assert response.status_code == 200
+        mock_send.assert_not_called()
+
+    @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
+    def test_the_number_may_be_written_differently_on_the_two_events(
+        self, mock_send, client
+    ):
+        """message.sent carries the customer in `to` and message.received in
+        `from`; nothing guarantees the two are punctuated alike. Keyed on the
+        raw strings, the pause was written under one spelling and looked up
+        under the other."""
+        self._owner_takes_over(client, "+91 94440 00003")
+
+        response = client.post(
+            "/webhook",
+            json=_make_webhook_payload("khamrah", sender="919444000003", message_id="ho_3"),
+        )
+        assert response.status_code == 200
+        mock_send.assert_not_called()
+
+    @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
+    def test_another_customer_is_answered_as_normal(self, mock_send, client):
+        """The pause is per conversation, not a kill switch."""
+        self._owner_takes_over(client, "919444000004")
+
+        response = client.post(
+            "/webhook",
+            json=_make_webhook_payload("khamrah", sender="919444000005", message_id="ho_4"),
+        )
+        assert response.status_code == 200
+        mock_send.assert_called_once()
+
+    @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
+    def test_the_bots_own_reply_echoing_back_does_not_pause_it(self, mock_send, client):
+        """The other direction of the same bug: if the echo is not
+        recognized, the bot pauses itself after its very first reply."""
+        customer = "919444000006"
+        client.post(
+            "/webhook",
+            json=_make_webhook_payload("khamrah", sender=customer, message_id="ho_5"),
+        )
+        reply_text = mock_send.call_args[0][1]
+
+        # Chat Mitra echoes it back, with the number punctuated differently
+        # and a trailing newline picked up in transit.
+        client.post(
+            "/webhook",
+            json=_make_message_sent_payload("+" + customer, reply_text + "\n"),
+        )
+
+        mock_send.reset_mock()
+        response = client.post(
+            "/webhook",
+            json=_make_webhook_payload("sauvage", sender=customer, message_id="ho_6"),
+        )
+        assert response.status_code == 200
+        mock_send.assert_called_once()
+
+
+class TestOutboundEventsAreRecognisedHoweverTheyArrive:
+    """
+    The handoff pause depends entirely on recognizing the webhook that says
+    a message went OUT to a customer. Reported from production after
+    message.sent had already been enabled in Chat Mitra: the bot still talked
+    over the owner.
+
+    Chat Mitra documents the INBOUND payload in detail and says much less
+    about the outbound one, and this code was written against a guess at it
+    — `event: "message.sent"`, `to`, and a `message` object with a plain
+    string `text`. Any of those being wrong discarded the event in silence.
+    Each case below is a shape that guess would have missed.
+    """
+
+    @patch("app.main.start_pause", new_callable=AsyncMock)
+    def _assert_pauses(self, payload, mock_start_pause, client):
+        response = client.post("/webhook", json=payload)
+        assert response.status_code == 200
+        mock_start_pause.assert_called_once()
+        return mock_start_pause.call_args[0][0]
+
+    def test_the_documented_shape_still_works(self, client):
+        assert self._assert_pauses(
+            {
+                "event": "message.sent",
+                "to": "919222000001",
+                "message": {"type": "text", "text": "sending the link now"},
+            },
+            client=client,
+        ) == "919222000001"
+
+    def test_text_nested_as_a_body_object(self, client):
+        """The send API itself uses {"text": {"body": ...}} — see
+        app.chatmitra.send_reply — so the echo may come back that way."""
+        assert self._assert_pauses(
+            {
+                "event": "message.sent",
+                "to": "919222000002",
+                "message": {"type": "text", "text": {"body": "sending the link now"}},
+            },
+            client=client,
+        ) == "919222000002"
+
+    def test_the_recipient_under_another_name(self, client):
+        assert self._assert_pauses(
+            {
+                "event": "message.sent",
+                "recipient_mobile_number": "919222000003",
+                "message": {"type": "text", "text": "sending the link now"},
+            },
+            client=client,
+        ) == "919222000003"
+
+    def test_a_plural_or_underscored_event_name(self, client):
+        assert self._assert_pauses(
+            {
+                "event": "messages.sent",
+                "to": "919222000004",
+                "message": {"type": "text", "text": "sending the link now"},
+            },
+            client=client,
+        ) == "919222000004"
+
+    def test_direction_alone_is_enough(self, client):
+        """If the event is named something nobody guessed, direction is still
+        the thing that actually matters — and Chat Mitra does document it."""
+        assert self._assert_pauses(
+            {
+                "event": "message.status.updated",
+                "direction": "outbound",
+                "to": "919222000005",
+                "message": {"type": "text", "text": "sending the link now"},
+            },
+            client=client,
+        ) == "919222000005"
+
+    @patch("app.main.start_pause", new_callable=AsyncMock)
+    def test_an_inbound_event_is_never_mistaken_for_one(self, mock_start_pause, client):
+        """The customer's own messages must not pause the bot against them."""
+        client.post("/webhook", json=_make_webhook_payload("khamrah", sender="919222000006"))
+        mock_start_pause.assert_not_called()
+
+    @patch("app.main.start_pause", new_callable=AsyncMock)
+    def test_an_outbound_event_with_no_recipient_is_ignored(self, mock_start_pause, client):
+        response = client.post(
+            "/webhook", json={"event": "message.sent", "message": {"type": "text", "text": "hi"}}
+        )
+        assert response.status_code == 200
+        mock_start_pause.assert_not_called()
+
+    @patch("app.main.send_reply", new_callable=AsyncMock, return_value=True)
+    @patch("app.main.match_perfume", new_callable=AsyncMock)
+    def test_an_outbound_event_never_reaches_the_matcher(self, mock_match, mock_send, client):
+        """Whatever shape it arrives in, it is not a customer asking for a
+        price and must never be answered as one."""
+        client.post(
+            "/webhook",
+            json={"direction": "outbound", "to": "919222000007", "text": "khamrah 3ml"},
+        )
+        mock_match.assert_not_called()
+        mock_send.assert_not_called()

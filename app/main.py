@@ -16,7 +16,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.analytics import is_first_contact, log_message_event
+from app.analytics import WELCOME_LAYER, has_been_welcomed, log_message_event
 from app.chatmitra import send_reply
 from app.config import settings
 from app.conversation import record_bot_reply, record_customer_message, recent_turns
@@ -30,7 +30,7 @@ from app.formatter import (
     build_not_in_stock_message,
     build_price_card,
 )
-from app.greeting import is_catalog_request, is_greeting_or_catalog_request
+from app.greeting import is_catalog_request, is_greeting, is_greeting_or_catalog_request
 from app.handoff import is_paused, record_own_send, start_pause, was_sent_by_bot
 from app.matcher import (
     MatchResult,
@@ -47,6 +47,11 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+
+# Filled in at startup by the handoff self-check in lifespan below, and
+# reported by /health so the answer is a URL rather than a log search.
+HANDOFF_STATUS: dict = {"durable": None, "detail": "not checked yet"}
 
 
 @asynccontextmanager
@@ -77,6 +82,23 @@ async def lifespan(app: FastAPI):
         logger.info("Perfume name index built")
     except Exception:
         logger.exception("Failed to pre-build the perfume name index — it will build on first use")
+
+    # The handoff pause is the one feature whose failure is invisible from
+    # the outside: a bot that never stops talking looks exactly like a bot
+    # nobody has taken a conversation away from. Reported from production
+    # as "I enabled message.sent and it still isn't working", with nothing
+    # in the logs either way. Now it says so, at boot, before any customer
+    # is affected.
+    try:
+        from app.handoff import self_check
+
+        HANDOFF_STATUS.update(await self_check())
+        if HANDOFF_STATUS["durable"]:
+            logger.info("HANDOFF: pause is durable — %s", HANDOFF_STATUS["detail"])
+        else:
+            logger.error("HANDOFF NOT DURABLE: %s", HANDOFF_STATUS["detail"])
+    except Exception:
+        logger.exception("Handoff self-check failed to run")
 
     yield
 
@@ -122,10 +144,11 @@ async def health_check():
     """
     Health check endpoint for UptimeRobot pings.
 
-    Returns 200 OK with no side effects, no external API calls.
-    Keeps the Render free-tier service warm.
+    Returns 200 OK with no side effects, no external API calls — the
+    handoff line is read from what the startup self-check already found
+    (see lifespan), not re-queried per ping.
     """
-    return {"status": "ok"}
+    return {"status": "ok", "handoff_pause": HANDOFF_STATUS}
 
 
 def _verify_webhook_signature(request: Request, body: bytes) -> bool:
@@ -158,6 +181,17 @@ def _verify_webhook_signature(request: Request, body: bytes) -> bool:
     ).hexdigest()
 
     return hmac.compare_digest(signature, expected)
+
+
+def _peek_event(body: bytes) -> str:
+    """The event name out of an unverified body, for logging only. Never
+    used to decide anything — a rejected webhook stays rejected."""
+    try:
+        import json
+
+        return str(json.loads(body or b"{}").get("event") or "(none)")
+    except Exception:
+        return "(unparseable)"
 
 
 def _extract_message_data(payload: dict) -> dict | None:
@@ -238,6 +272,78 @@ async def _send_and_record(sender: str, reply_text: str) -> bool:
     return success
 
 
+# Where an outbound-message webhook might carry the customer's number, and
+# where it might carry the text. Chat Mitra's documentation covers the
+# INBOUND shape in detail and says much less about the outbound one, and the
+# handoff pause was written against a guess at it: `to` plus a `message`
+# object with a plain-string `text`. If any of that is wrong the event is
+# silently discarded and the bot talks straight over the owner, which is
+# exactly what was reported after message.sent had already been enabled.
+#
+# Reading several plausible spellings costs nothing and removes a whole
+# class of that failure. The send API itself nests text as
+# {"text": {"body": ...}} (see app.chatmitra.send_reply), so the echo may
+# well come back that way too.
+_RECIPIENT_FIELDS = ("to", "recipient", "recipient_mobile_number", "contact", "customer", "wa_id")
+_TEXT_FIELDS = ("text", "body", "message", "caption")
+
+
+def _first_string(source: dict, fields: tuple[str, ...]) -> str:
+    for field in fields:
+        value = source.get(field)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _outbound_recipient(payload: dict) -> str:
+    """The customer an outbound-message event is about."""
+    found = _first_string(payload, _RECIPIENT_FIELDS)
+    if found:
+        return found
+    message = payload.get("message")
+    return _first_string(message, _RECIPIENT_FIELDS) if isinstance(message, dict) else ""
+
+
+def _outbound_text(payload: dict) -> str:
+    """The body of an outbound-message event, however it is nested."""
+    message = payload.get("message")
+    if isinstance(message, dict):
+        text = message.get("text")
+        if isinstance(text, dict):
+            return str(text.get("body") or "").strip()
+        if isinstance(text, str):
+            return text.strip()
+        found = _first_string(message, _TEXT_FIELDS)
+        if found:
+            return found
+    if isinstance(message, str):
+        return message.strip()
+    text = payload.get("text")
+    if isinstance(text, dict):
+        return str(text.get("body") or "").strip()
+    return _first_string(payload, _TEXT_FIELDS)
+
+
+def _is_outbound_message(payload: dict) -> bool:
+    """
+    Whether this webhook is reporting a message that went OUT to a customer
+    — the event the handoff pause depends on entirely.
+
+    Matched on direction as well as on the event name, deliberately. Keying
+    only on the exact string "message.sent" means one rename, one plural, or
+    one provider that spells it "messages.sent" turns the pause off with no
+    symptom other than a bot that never stops talking. Direction is the
+    thing that actually matters and the thing Chat Mitra documents.
+    """
+    event = str(payload.get("event") or "").lower()
+    if event.replace("_", ".").replace("messages.", "message.") == "message.sent":
+        return True
+    if str(payload.get("direction") or "").lower() == "outbound":
+        return bool(_outbound_recipient(payload))
+    return False
+
+
 async def _handle_message_sent(payload: dict) -> None:
     """
     Handle a "message.sent" webhook event — Chat Mitra reports every
@@ -250,20 +356,35 @@ async def _handle_message_sent(payload: dict) -> None:
     owner taking over — which pauses the bot for that customer (see
     app.handoff.start_pause / the pause-check branch in webhook_handler).
     """
-    to = payload.get("to", "")
+    to = _outbound_recipient(payload)
     if not to:
+        logger.warning(
+            "Outbound-message webhook carried no recognizable recipient — the handoff "
+            "pause cannot be attributed to a conversation. Raw payload: %r",
+            payload,
+        )
         return
 
-    message = payload.get("message") or {}
-    text = message.get("text", "") if message.get("type") == "text" else ""
+    text = _outbound_text(payload)
 
     if was_sent_by_bot(to, text):
+        logger.info("message.sent to %s is the bot's own reply echoing back", to)
         return
 
-    logger.info(
-        "Human agent message detected to %s — pausing bot for this conversation", to
+    # Logged at WARNING, not INFO, and so is the outcome. This is the branch
+    # that decides whether the bot talks over a human mid-sale, and when it
+    # was reported failing in production there was nothing in the logs that
+    # said whether the event had even arrived, let alone whether the pause
+    # stuck. Both are now visible at a glance.
+    logger.warning(
+        "HANDOFF: owner messaged %s directly — pausing the bot for this conversation", to
     )
-    await start_pause(to)
+    persisted = await start_pause(to)
+    logger.warning(
+        "HANDOFF: pause for %s is active (%s)",
+        to,
+        "saved to Supabase" if persisted else "IN MEMORY ONLY — see the error above",
+    )
 
 
 # Beyond this many words, a message is a conversation rather than someone
@@ -319,8 +440,8 @@ async def webhook_handler(request: Request):
     3. Dedup check (covers every reply path below uniformly)
     3a. Human-handoff pause short-circuit (the bot stays completely silent
         for a sender the owner is already personally handling)
-    3b. First-contact welcome short-circuit (the very first message ever
-        seen from this sender gets WELCOME_MESSAGE regardless of content)
+    3b. Welcome short-circuit (a sender's FIRST bare greeting, and only
+        their first, gets the long WELCOME_MESSAGE)
     4. Sanity checks (message type, empty text)
     5. Order-confirmation short-circuit (before the length cutoff — an order
        with many line items can be long, and it must never reach the matcher)
@@ -334,7 +455,18 @@ async def webhook_handler(request: Request):
 
     # Step 1: Verify webhook signature
     if not _verify_webhook_signature(request, body):
-        logger.warning("Webhook signature verification failed")
+        # Named, because "the signature is wrong" and "the signature is wrong
+        # for THIS event type" are different problems with the same message.
+        # If a provider signs inbound webhooks and not outbound ones, every
+        # message.sent is rejected here, the handoff pause never runs, and
+        # the only trace is a warning that reads like ordinary noise.
+        logger.warning(
+            "Webhook signature verification FAILED — event=%r, signature header %s. "
+            "If this is only happening for outbound events, the handoff pause is "
+            "being blocked here and never reaches _handle_message_sent.",
+            _peek_event(body),
+            "present" if request.headers.get("x-webhook-signature") else "MISSING",
+        )
         return Response(status_code=403, content="Forbidden")
 
     # Parse JSON payload
@@ -347,14 +479,28 @@ async def webhook_handler(request: Request):
     # Step 2b: message.sent events (see _handle_message_sent) are handled
     # here, before _extract_message_data — which only recognizes
     # message.received and would otherwise silently swallow this one too.
-    if payload.get("event") == "message.sent":
+    if _is_outbound_message(payload):
         await _handle_message_sent(payload)
         return Response(status_code=200, content="OK")
 
     # Step 2: Extract message data
     msg_data = _extract_message_data(payload)
     if not msg_data:
-        # Not a recognizable message event — silently acknowledge
+        # Not a message we act on — acknowledged, but named in the log. The
+        # handoff pause depends entirely on message.sent events arriving,
+        # and if Chat Mitra is not subscribed to send them there is nothing
+        # to see except a bot that never pauses. Naming every event that
+        # arrives is what tells those two apart.
+        # The whole payload, not just the name. The handoff pause depends on
+        # recognizing outbound-message events, and when one is not recognized
+        # the only way to find out why is to see what actually arrived —
+        # which is the position this was debugged from, with nothing logged
+        # but a shrug.
+        logger.info(
+            "Ignoring webhook event %r — not an inbound message. Raw payload: %r",
+            payload.get("event") or "(none)",
+            payload,
+        )
         return Response(status_code=200, content="OK")
 
     message_id = msg_data["message_id"]
@@ -395,20 +541,32 @@ async def webhook_handler(request: Request):
         )
         return Response(status_code=200, content="OK")
 
-    # Step 3b: First-contact welcome — the very first message the bot has
-    # ever received from this sender gets WELCOME_MESSAGE no matter what it
-    # says (image, empty, order confirmation, gibberish, all of it). Checked
-    # before every other branch below so none of them can pre-empt it, and
-    # returns immediately so the matching pipeline never runs for it.
-    if await is_first_contact(sender):
+    # Step 3b: The welcome — the long introduction with the catalog link,
+    # the shipping terms and the shop's whole pitch. Sent on a customer's
+    # FIRST hello and never again.
+    #
+    # Both halves of that matter. It used to go out on the first message a
+    # sender ever sent, whatever it said, which meant someone opening with
+    # "khamrah price" got a wall of shop information instead of the price
+    # they asked for. So it is gated on the message being a greeting AND
+    # NOTHING ELSE (see app.greeting.is_greeting) — "hi khamrah price" is a
+    # price question with a polite opener, and falls through to the normal
+    # pipeline below.
+    #
+    # And it is once per customer, not once per conversation: every later
+    # "hi" gets the short FALLBACK_MESSAGE from the greeting branch further
+    # down, which is the same catalog link without the introduction they
+    # have already read. has_been_welcomed reads that from the event log, so
+    # it survives restarts and redeploys.
+    if is_greeting(message_text) and not await has_been_welcomed(sender):
         success = await _send_and_record(sender, WELCOME_MESSAGE)
-        _log_outbound(sender, WELCOME_MESSAGE, success, reason="welcome_first_contact")
+        _log_outbound(sender, WELCOME_MESSAGE, success, reason=WELCOME_LAYER)
         await log_message_event(
             message_id=message_id,
             sender=sender,
             message_text=message_text,
             perfume_id=None,
-            layer="welcome_first_contact",
+            layer=WELCOME_LAYER,
             confidence=None,
             ambiguous=False,
             reply_sent=success,

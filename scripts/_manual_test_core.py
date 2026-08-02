@@ -7,7 +7,7 @@ stubbed out:
 
   - app.chatmitra.send_reply         -> captured locally, never actually sent
   - app.analytics.log_message_event  -> captured locally, never written to Supabase
-  - app.analytics.is_first_contact   -> backed by an in-memory set, never
+  - app.analytics.has_been_welcomed  -> backed by an in-memory set, never
                                          queries real Supabase
   - app.handoff.is_paused/start_pause -> backed by an in-memory dict, never
                                          queries real Supabase (see
@@ -44,6 +44,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 import app.main as main  # noqa: E402
 from app import conversation, groq_client, handoff  # noqa: E402
+from app.analytics import WELCOME_LAYER  # noqa: E402
 
 DEFAULT_SENDER = "919876543210"
 
@@ -63,6 +64,11 @@ class Harness:
 
     def __init__(self):
         self.seen_senders: set[str] = set()
+        # Senders who have already been sent the long welcome. Separate from
+        # seen_senders because the two are genuinely different questions
+        # now: the welcome goes out on a customer's first bare greeting,
+        # which may not be the first message they ever sent.
+        self.welcomed_senders: set[str] = set()
         self.groq_enabled = False
         self.client: TestClient | None = None
         self._captured: dict = {}
@@ -89,9 +95,9 @@ class Harness:
         )
         s.enter_context(
             patch(
-                "app.main.is_first_contact",
+                "app.main.has_been_welcomed",
                 new_callable=AsyncMock,
-                side_effect=self._fake_is_first_contact,
+                side_effect=self._fake_has_been_welcomed,
             )
         )
         s.enter_context(
@@ -113,8 +119,8 @@ class Harness:
     def __exit__(self, *exc_info) -> None:
         self._stack.close()
 
-    async def _fake_is_first_contact(self, sender: str) -> bool:
-        return sender not in self.seen_senders
+    async def _fake_has_been_welcomed(self, sender: str) -> bool:
+        return sender in self.welcomed_senders
 
     async def _fake_send_reply(self, to: str, message_text: str) -> bool:
         self._captured["reply_text"] = message_text
@@ -167,14 +173,17 @@ class Harness:
         self._captured.clear()
         self.client.post("/webhook", json=payload)
         self.seen_senders.add(sender)
+        if self._captured.get("layer") == WELCOME_LAYER:
+            self.welcomed_senders.add(sender)
         return dict(self._captured)
 
     def reset_sender(self, sender: str) -> None:
-        """Forget this sender entirely — first-contact status AND the recent
-        conversation, so the next message starts a genuinely fresh chat
-        rather than one where the bot still remembers the last price card
-        and resolves "and 5ml?" against it."""
+        """Forget this sender entirely — whether they have been welcomed AND
+        the recent conversation, so the next message starts a genuinely
+        fresh chat rather than one where the bot still remembers the last
+        price card and resolves "and 5ml?" against it."""
         self.seen_senders.discard(sender)
+        self.welcomed_senders.discard(sender)
         conversation.clear(sender)
 
     def is_known(self, sender: str) -> bool:

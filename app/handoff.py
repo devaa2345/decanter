@@ -17,10 +17,16 @@ have come from the owner directly — see was_sent_by_bot.
 
 Everything here follows the same graceful-degradation pattern as
 app.analytics: best-effort on the customer-facing path (is_paused,
-start_pause never raise — Supabase being unset just means the pause
-feature quietly can't do anything, never that the bot breaks), but the
-admin-facing settings get/set raise SupabaseUnavailable so a failed save
-is never silently swallowed on the owner's dashboard.
+start_pause never raise), while the admin-facing settings get/set raise
+SupabaseUnavailable so a failed save is never silently swallowed on the
+owner's dashboard.
+
+"Best-effort" used to mean the pause simply did not happen when Supabase
+could not be reached, and said nothing about it. That was reported from
+production as the bot talking over the owner mid-conversation. The pause
+now takes effect in memory first and Supabase second, so it holds for the
+life of the process regardless, and a failed write is logged loudly
+instead of swallowed.
 """
 
 import asyncio
@@ -45,6 +51,37 @@ _OWN_SEND_MAX_SIZE = 2000
 
 _own_sends: "OrderedDict[tuple[str, str], float]" = OrderedDict()
 
+# Active pauses, in memory. Supabase remains the durable record — this
+# survives neither a restart nor a second worker — but the pause has to
+# work even when Supabase does not, and previously it did not: every write
+# path here swallows its exception, so an unconfigured URL, a missing
+# migration or an RLS rule blocking the key all produced a pause that was
+# never stored and a bot that carried on talking over the owner, with
+# nothing in the logs to say so. Reported from production exactly that way.
+_paused_until: dict[str, float] = {}
+
+# Digits only. The two webhook events do not agree on formatting: an
+# inbound message.received carries the customer in `from`, an outbound
+# message.sent carries them in `to`, and Chat Mitra is free to write one
+# with a leading "+", a country-code prefix or a "@c.us" suffix and the
+# other without. Every key in this module — own-send records, pause rows,
+# pause lookups — is derived through normalize_sender, so a difference in
+# punctuation can never again mean the pause is written under one name and
+# read under another.
+
+
+def normalize_sender(value: str) -> str:
+    """A phone number reduced to the digits that identify it.
+
+    Trailing suffixes ("919876543210@c.us") and formatting ("+91 98765
+    43210") are stripped, and a leading zero or a bare 10-digit Indian
+    number is left as-is rather than guessed at — the goal is only that the
+    SAME number always produces the same key, not that it round-trips to
+    anything canonical.
+    """
+    digits = "".join(ch for ch in str(value or "") if ch.isdigit())
+    return digits.lstrip("0") or digits
+
 
 # --- Own-send echo detection (in-memory, no Supabase) -----------------------
 
@@ -58,27 +95,37 @@ def _evict_expired_own_sends() -> None:
             break
 
 
+def _echo_key(recipient: str, message_text: str) -> tuple[str, str]:
+    """The identity of one outbound message, as this module compares them:
+    the recipient by digits alone, and the text with surrounding whitespace
+    removed. Trailing whitespace is the kind of thing a messaging platform
+    normalizes on the way through, and an echo that failed to match would
+    be read as the owner taking over — pausing the bot on its own reply."""
+    return (normalize_sender(recipient), (message_text or "").strip())
+
+
 def record_own_send(recipient: str, message_text: str) -> None:
     """Call this right after a successful send_reply() so a later
     message.sent echo of THIS reply is never mistaken for the owner
     taking over the conversation."""
     _evict_expired_own_sends()
-    _own_sends[(recipient, message_text)] = time.time()
+    _own_sends[_echo_key(recipient, message_text)] = time.time()
     while len(_own_sends) > _OWN_SEND_MAX_SIZE:
         _own_sends.popitem(last=False)
 
 
 def was_sent_by_bot(recipient: str, message_text: str) -> bool:
-    """True if this exact (recipient, text) matches a recent record_own_send
-    call — i.e. this message.sent webhook event is just Chat Mitra echoing
-    back the bot's own reply, not the owner sending something new."""
+    """True if this (recipient, text) matches a recent record_own_send call
+    — i.e. this message.sent webhook event is just Chat Mitra echoing back
+    the bot's own reply, not the owner sending something new."""
     _evict_expired_own_sends()
-    return (recipient, message_text) in _own_sends
+    return _echo_key(recipient, message_text) in _own_sends
 
 
 def clear_own_sends() -> None:
     """Test-only reset."""
     _own_sends.clear()
+    _paused_until.clear()
 
 
 # --- Pause state (Supabase-backed, best-effort on the customer-facing path) -
@@ -104,20 +151,30 @@ def _upsert_pause_row(client, sender: str, paused_until_iso: str) -> None:
 async def is_paused(sender: str) -> bool:
     """
     True if the bot should stay completely silent for this sender right
-    now — the owner messaged them directly and the configured pause
-    window hasn't elapsed yet (see app.main's pause-check branch).
+    now — the owner messaged them directly and the configured pause window
+    hasn't elapsed yet (see app.main's pause-check branch).
 
-    Best-effort: if Supabase isn't configured, or the query fails, there's
-    no way to know a pause is active, so this returns False (bot behaves
-    normally) rather than risk staying silent forever with no way to
-    recover.
+    Memory first, Supabase second, and the order matters: a pause this
+    process recorded is authoritative even if it never reached the
+    database. Supabase is still consulted, because the pause has to hold
+    across a restart and across workers.
+
+    If neither can answer, this returns False — the bot behaves normally
+    rather than risking silence forever with no way to recover.
     """
+    key = normalize_sender(sender)
+    until = _paused_until.get(key)
+    if until is not None:
+        if time.time() < until:
+            return True
+        _paused_until.pop(key, None)
+
     client = get_client()
     if client is None:
         return False
 
     try:
-        row = await asyncio.to_thread(_fetch_pause_row, client, sender)
+        row = await asyncio.to_thread(_fetch_pause_row, client, key)
     except Exception:
         logger.exception("Failed to check human-handoff pause state in Supabase")
         return False
@@ -133,25 +190,88 @@ async def is_paused(sender: str) -> bool:
     return datetime.now(timezone.utc) < paused_until
 
 
-async def start_pause(sender: str) -> None:
+async def start_pause(sender: str) -> bool:
     """
     Called when the owner is detected sending a message directly to this
-    sender (see app.main's message.sent handling) — pauses the bot for
-    this sender for the currently configured duration, starting now.
-    Best-effort: a Supabase hiccup here means the pause silently doesn't
-    take effect, same tradeoff as everything else in this module.
+    sender (see app.main's message.sent handling) — pauses the bot for this
+    sender for the currently configured duration, starting now.
+
+    The pause takes effect IN MEMORY before Supabase is touched, so it
+    holds whether or not the write lands. It used to be Supabase-only with
+    every failure swallowed, which meant an unconfigured URL, a missing
+    migration or an RLS rule blocking the key produced a bot that carried
+    on talking over the owner and said nothing about why. Returns whether
+    the pause was also persisted, so the caller can say so in the log.
+    """
+    key = normalize_sender(sender)
+    hours = await get_pause_duration_hours()
+    _paused_until[key] = time.time() + hours * 3600
+
+    client = get_client()
+    if client is None:
+        logger.warning(
+            "Human-handoff pause for %s is in memory only — Supabase is not "
+            "configured, so it will not survive a restart",
+            sender,
+        )
+        return False
+
+    paused_until = (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat()
+    try:
+        await asyncio.to_thread(_upsert_pause_row, client, key, paused_until)
+    except Exception:
+        logger.exception(
+            "Failed to record human-handoff pause for %s in Supabase — the pause is "
+            "active in memory but will not survive a restart. Check that migration "
+            "0003_human_handoff.sql has been applied and the service key can write "
+            "to human_takeovers.",
+            sender,
+        )
+        return False
+    return True
+
+
+async def self_check() -> dict:
+    """
+    Can the handoff pause actually be stored? Answered at startup rather
+    than the first time the owner takes over a conversation.
+
+    Every failure on this path is deliberately swallowed so a Supabase
+    hiccup can never stop a customer getting a price — which is right, and
+    which also meant the pause could be a complete no-op for months with
+    nothing to show for it but a bot that talked over the owner. The
+    difference between "working" and "silently doing nothing" is one query,
+    and this is it.
+
+    Returns {"durable": bool, "detail": str} — never raises.
     """
     client = get_client()
     if client is None:
-        return
-
-    hours = await get_pause_duration_hours()
-    paused_until = (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat()
+        return {
+            "durable": False,
+            "detail": (
+                "Supabase is not configured (SUPABASE_URL / "
+                "SUPABASE_SERVICE_ROLE_KEY). The handoff pause will work "
+                "within a single running process but will not survive a "
+                "restart — and on a free plan the service sleeps when idle, "
+                "so a customer replying an hour later gets answered by the bot."
+            ),
+        }
 
     try:
-        await asyncio.to_thread(_upsert_pause_row, client, sender, paused_until)
-    except Exception:
-        logger.exception("Failed to record human-handoff pause in Supabase")
+        await asyncio.to_thread(_fetch_pause_row, client, "__self_check__")
+    except Exception as exc:
+        return {
+            "durable": False,
+            "detail": (
+                f"Supabase is configured but human_takeovers could not be read "
+                f"({type(exc).__name__}: {exc}). Apply "
+                f"supabase/migrations/0003_human_handoff.sql. Until then the "
+                f"handoff pause holds in memory only."
+            ),
+        }
+
+    return {"durable": True, "detail": "human_takeovers is readable"}
 
 
 # --- Configurable pause duration (owner dashboard Settings page) ------------
